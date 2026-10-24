@@ -8,13 +8,18 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 
+import java.util.Set;
+
 /**
- * Not transactional on purpose: the PSP call happens outside any DB transaction. A PSP 4xx is a
- * final decline and becomes PaymentFailed. Transient PSP failures (timeouts, 5xx, open circuit) propagate so the container's error handler retries with
+ * Not transactional on purpose: the PSP call happens outside any DB transaction. A final PSP decline
+ * (400, 402, 422) becomes PaymentFailed; every other failure is retried. Transient PSP failures (timeouts, 5xx, open circuit) propagate so the container's error handler retries with
  * backoff and finally dead-letters the command.
  */
 @Component
 public class PaymentCommandListener {
+
+    /** PSP statuses that are the final answer for this charge: invalid request, card declined, unprocessable. */
+    private static final Set<Integer> FINAL_DECLINES = Set.of(400, 402, 422);
 
     private final PspClient psp;
     private final PaymentRecorder recorder;
@@ -39,8 +44,12 @@ public class PaymentCommandListener {
         try {
             response = psp.capture("capture-" + command.orderId(), command.customerId(), command.amount());
         } catch (HttpClientErrorException rejected) {
-            // A 4xx is the PSP's final answer (card declined, invalid request): fail the payment, don't retry.
-            response = new PspClient.CaptureResponse(null, "rejected_" + rejected.getStatusCode().value());
+            if (!FINAL_DECLINES.contains(rejected.getStatusCode().value())) {
+                // 401/403 (our credentials), 408/409/425/429 (retry later): not the customer's answer.
+                // Propagate so the error handler retries, then dead-letters and pages.
+                throw rejected;
+            }
+            response = new PspClient.CaptureResponse(null, "declined_" + rejected.getStatusCode().value());
         }
         recorder.record(messageId, command, response);
     }

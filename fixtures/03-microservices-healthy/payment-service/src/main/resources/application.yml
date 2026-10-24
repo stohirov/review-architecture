@@ -74,7 +74,9 @@ resilience4j:
         slow-call-duration-threshold: 2s
         wait-duration-in-open-state: 30s
         ignore-exceptions:
-          - org.springframework.web.client.HttpClientErrorException
+          - org.springframework.web.client.HttpClientErrorException$BadRequest
+          - org.springframework.web.client.HttpClientErrorException$PaymentRequired
+          - org.springframework.web.client.HttpClientErrorException$UnprocessableEntity
   retry:
     instances:
       psp:
@@ -84,4 +86,8 @@ resilience4j:
         exponential-backoff-multiplier: 2
         enable-randomized-wait: true
         ignore-exceptions:
-          - org.springframework.web.client.HttpClientErrorException
+          - org.springframework.web.client.HttpClientErrorException$BadRequest
+          - org.springframework.web.client.HttpClientErrorException$PaymentRequired
+          - org.springframework.web.client.HttpClientErrorException$UnprocessableEntity
+          - org.springframework.web.client.HttpClientErrorException$Unauthorized
+          - org.springframework.web.client.HttpClientErrorException$Forbidden
