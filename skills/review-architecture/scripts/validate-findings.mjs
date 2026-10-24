@@ -182,13 +182,36 @@ export function checkReport(doc, markdown) {
   return errors;
 }
 
-// Design mode: every location that cites the brief must name one of its real headings.
+const MIN_QUOTE_LENGTH = 15;
+const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+/u;
+
+// Markdown emphasis and quote characters vary between a brief and a quotation of it.
+function normalizeQuote(text) {
+  return text.replace(/[`*_"'“”‘’]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+// Passages inside double quotes in the evidence, split at elisions ("..." or "…");
+// fragments shorter than MIN_QUOTE_LENGTH are too ambiguous to check.
+function quotedSegments(evidence) {
+  return [...evidence.matchAll(/["“]([^"“”]+)["”]/gu)]
+    .flatMap((m) => m[1].split(/\.{3}|…/u))
+    .map((q) => q.replace(LIST_MARKER, ""))
+    .filter((q) => normalizeQuote(q).length >= MIN_QUOTE_LENGTH);
+}
+
+// Design mode: every location that cites the brief must name one of its real headings,
+// and every quoted passage in the evidence must appear verbatim in the brief.
 export function checkBrief(doc, briefMarkdown, briefName) {
   if (!Array.isArray(doc?.findings)) return [];
   const headings = new Set();
   for (const { heading } of markdownLines(briefMarkdown)) if (heading) headings.add(normalizeHeading(heading.text));
+  // Quotes may run across list items, so line-leading bullets and numbers are ignored.
+  const brief = normalizeQuote(briefMarkdown.replace(new RegExp(LIST_MARKER.source, "gmu"), ""));
   const errors = [];
   for (const f of doc.findings) {
+    for (const quote of typeof f?.evidence === "string" ? quotedSegments(f.evidence) : []) {
+      if (!brief.includes(normalizeQuote(quote))) errors.push(`brief: ${f.id} quotes "${quote.slice(0, 60)}", which is not in ${briefName}`);
+    }
     for (const loc of Array.isArray(f?.locations) ? f.locations : []) {
       if (typeof loc?.file !== "string" || basename(loc.file) !== briefName || typeof loc.section !== "string") continue;
       if (!headings.has(normalizeHeading(loc.section))) errors.push(`brief: ${f.id} cites section "${loc.section}", which is not a heading in ${briefName}`);

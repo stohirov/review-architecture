@@ -87,7 +87,7 @@ Write two files:
 
 In codebase and hybrid mode they go in the project root; in design mode, the current directory. Use another location if the user names one.
 
-Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json --report <path>/architecture-review.md`, adding `--brief <brief file>` in design mode, and fix the files until it exits 0. The `--report` check confirms the report's sections, that each finding has its heading under its own severity, and that every non-info finding is on the roadmap. `--brief` confirms that every design-mode `section` is a real heading in the brief.
+Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json --report <path>/architecture-review.md`, adding `--brief <brief file>` in design mode, and fix the files until it exits 0. The `--report` check confirms the report's sections, that each finding has its heading under its own severity, and that every non-info finding is on the roadmap. `--brief` confirms that every design-mode `section` is a real heading in the brief, and that every quoted passage in `evidence` appears verbatim in it (elisions marked `...` are allowed).
 
 Done when the validator passes with `--report`.
 

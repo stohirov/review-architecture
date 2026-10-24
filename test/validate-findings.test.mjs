@@ -220,3 +220,24 @@ test("dropped candidates are recorded as strings", () => {
   assert.deepEqual(validate(doc({ dropped: ["persistence: CONCURRENTLY index (migration already ran)"] })), []);
   assert.ok(validate(doc({ dropped: [""] })).some((e) => e.includes("must not be blank")));
 });
+
+test("checkBrief requires quoted evidence to be verbatim in the brief", () => {
+  const brief = "## Data\nAll eight services connect to **one shared** PostgreSQL cluster.\nUses `UPDATE drivers SET lat = ?`.\n";
+  const d = doc({
+    mode: "design",
+    findings: [
+      finding({ locations: [{ file: "b.md", section: "Data" }], evidence: 'Brief: "all eight services connect to one shared   PostgreSQL" and “UPDATE drivers SET lat = ?” (no fallback given)' }),
+      finding({ id: "DC-002", locations: [{ file: "b.md", section: "Data" }], evidence: '"every service has its own database" and "short"' }),
+    ],
+  });
+  assert.deepEqual(checkBrief(d, brief, "b.md"), ['brief: DC-002 quotes "every service has its own database", which is not in b.md']);
+});
+
+test("checkBrief allows elisions and swapped inner quotes", () => {
+  const brief = '## Services\n4. **location-service**: receives driver GPS pings and answers "where is driver X".\n5. matching-service keeps drivers in an in-memory map.\n';
+  const d = doc({
+    mode: "design",
+    findings: [finding({ locations: [{ file: "b.md", section: "Services" }], evidence: `"4. location-service: receives driver GPS pings and answers 'where is driver X'. ... matching-service keeps drivers in an in-memory map … invented tail that is long"` })],
+  });
+  assert.deepEqual(checkBrief(d, brief, "b.md"), ['brief: DC-001 quotes " invented tail that is long", which is not in b.md']);
+});
