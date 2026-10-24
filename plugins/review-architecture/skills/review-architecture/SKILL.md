@@ -9,6 +9,8 @@ Find the system-design mistakes that will hurt this project at its real scale, p
 
 **Proportionality** governs every recommendation. Each finding names the condition in *this* project (`applies_when`) that makes the fix worth its cost. A saga in a single-database monolith, a broker for fifty requests a day, or microservices for a three-person team are wrong answers even when they are textbook patterns.
 
+The review is **read-only**. Read and search files; the only things you write are the two report files in step 6 and working notes in a temporary directory. The only command you run is the validator in step 6. Never install packages, make network requests, or run the project's builds, tests or code.
+
 Everything below is relative to this skill's directory (the folder holding this file). Resolve it to an absolute path once; subagents need absolute paths.
 
 - `references/INTAKE.md`: design-mode questions
