@@ -85,7 +85,7 @@ function crossFieldChecks(doc, errors) {
     if ((f?.severity === "critical" || f?.severity === "high") && f?.confidence === "low") {
       errors.push(`${at}: ${f.severity} findings need medium or high confidence; verify or downgrade`);
     }
-    if (doc.mode === "codebase" && Array.isArray(f?.locations)) {
+    if ((doc.mode === "codebase" || doc.mode === "hybrid") && Array.isArray(f?.locations)) {
       f.locations.forEach((loc, j) => {
         if (loc && loc.line === undefined && loc.section === undefined) {
           errors.push(`${at}.locations[${j}]: codebase findings need a line or section`);

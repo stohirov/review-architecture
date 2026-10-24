@@ -86,6 +86,11 @@ test("codebase locations need a line or section", () => {
   assert.ok(errors.some((e) => e.includes("need a line or section")));
 });
 
+test("hybrid locations follow the codebase rule", () => {
+  const errors = validate(doc({ mode: "hybrid", findings: [finding({ locations: [{ file: "a.java" }] })] }));
+  assert.ok(errors.some((e) => e.includes("need a line or section")));
+});
+
 test("design locations need the brief section", () => {
   const errors = validate(doc({ mode: "design", findings: [finding({ locations: [{ file: "brief.md", line: 3 }] })] }));
   assert.ok(errors.some((e) => e.includes("need the brief section")));

@@ -44,7 +44,7 @@ When a root cause fits more than one row, its owner is the lens whose fix closes
 
 ### Severity
 
-Grade by the worst realistic outcome. Then lower it one level if that outcome needs two independent failures at the same time. If infrastructure the repo doesn't show might *prevent* the failure (a LimitRange, an ingress policy), keep the severity, lower the confidence, and say what would have to exist. In design mode, grade against the brief and the profile's assumptions.
+Grade by the worst realistic outcome. Then lower it one level for each independent failure, beyond the first, that must coincide for the outcome to happen. If infrastructure the repo doesn't show might *prevent* the failure (a LimitRange, an ingress policy), cap the confidence at medium, keep the severity, and say what would have to exist. In design mode, grade against the brief and the profile's assumptions.
 
 - **critical**: loses or corrupts data, leaves money or stock inconsistent, or causes an outage under normal load. Also: blocks horizontal scaling outright when the project needs more than one instance.
 - **high**: wrong behaviour under ordinary failures (a retry, a crash between two steps, a slow dependency) or at the project's stated scale.
@@ -69,8 +69,8 @@ Return exactly these two parts and nothing else, as your final message or throug
    - `severity`
    - `confidence`
    - `locations`:
-     - codebase: `[{ "file": "<repo-relative path>", "line": <n> }]`
-     - a finding about something *missing*: point at the file where the setting or code belongs, with `"section": "missing <what>"` instead of a line
+     - codebase and hybrid: `[{ "file": "<repo-relative path>", "line": <n> }]`
+     - a finding about something *missing*: point at the file where the setting or code belongs (if none exists, the closest build or deploy file), with `"section": "missing <what>"` instead of a line
      - design mode: `[{ "file": "<brief filename or 'conversation'>", "section": "<the brief's exact heading text>" }]`; for a gap, the heading of the section where the answer belongs
    - `evidence`: quoted code, or text quoted verbatim from the brief (never from the profile); for a gap, say what the brief leaves out
    - `failure_scenario`: the concrete sequence of events that goes wrong

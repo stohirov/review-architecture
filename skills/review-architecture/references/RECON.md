@@ -41,6 +41,7 @@ stated intent: <scale targets, SLAs, plans, or unknown>
 assumptions: <every decision you made in place of asking, or none>
 derived load: <design mode, or when stated intent gives numbers: peak rates per flow you computed>
 key flows: <1–3 business flows that cross a deployable or datastore boundary, as A -> B -> C>
+lenses run: <added in step 3>
 ```
 
 **Key flows** matter most for microservices: they are where distributed-transaction, saga and resilience problems live. Trace at least the main write flow (for example, place order) end to end.
