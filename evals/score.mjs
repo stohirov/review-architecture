@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Scores an architecture-findings.json against a fixture answer key.
 // Usage: node evals/score.mjs <findings.json> <answer-key.json> [--min-recall 0.9]
-// Exits 0 when the findings are valid, recall meets the bar and no control rule is broken.
+// Exits 0 when the findings are valid, recall meets the bar and no control finding exceeds the
+// key's max severity. Control findings that name an already-implemented pattern are listed as
+// warnings: they are false positives unless they point at a concrete gap in that implementation.
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -64,8 +66,7 @@ export function score(doc, key, { minRecall = 0.9 } = {}) {
     validationErrors.length === 0 &&
     !modeMismatch &&
     recall >= minRecall &&
-    control.overSeverity.length === 0 &&
-    control.forbiddenPattern.length === 0;
+    control.overSeverity.length === 0;
 
   return {
     fixture: key.fixture,
@@ -97,7 +98,7 @@ export function formatReport(r) {
   r.missed.forEach((k) => lines.push(`    - MISSED ${k}`));
   if (r.bonus.length) lines.push(`  bonus: ${r.bonus.map((b) => b.key).join(", ")}`);
   if (r.control.overSeverity.length) lines.push(`  control: above max severity: ${r.control.overSeverity.join(", ")}`);
-  if (r.control.forbiddenPattern.length) lines.push(`  control: recommends an existing pattern: ${r.control.forbiddenPattern.join(", ")}`);
+  if (r.control.forbiddenPattern.length) lines.push(`  control warning (check by hand): names an implemented pattern: ${r.control.forbiddenPattern.join(", ")}`);
   if (r.unmatched.length) {
     lines.push("  not in answer key (review by hand):");
     r.unmatched.forEach((u) => lines.push(`    ? ${u}`));

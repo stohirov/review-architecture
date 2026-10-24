@@ -2,8 +2,6 @@
 
 Does data access stay efficient and safe as data grows? Read entities, repositories, queries, migrations and datasource config.
 
-Unbounded result sets belong to the scalability lens (`sc.unbounded-results`). Report them here only if that lens is not running.
-
 **Pattern vocabulary**: `fetch-join`, `entity-graph`, `batch-fetching`, `dto-projection`, `add-index`, `disable-open-in-view`, `connection-pool-sizing`, `versioned-migrations`, `expand-contract-migration`, `bulk-operations`, `read-replica`, `data-retention`.
 
 ---

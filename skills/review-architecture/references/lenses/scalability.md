@@ -4,7 +4,7 @@ Can this system run as N identical instances behind a load balancer, and does it
 
 Grade against the profile's stated intent. A single-instance internal tool with no growth plan does not need horizontal scaling. Say so, and cap these rules at low.
 
-**Pattern vocabulary**: `externalize-session`, `stateless-service`, `object-storage`, `distributed-cache`, `cache-invalidation`, `distributed-lock`, `leader-election`, `async-offload`, `work-queue`, `pagination`, `read-replica`, `cqrs-read-model`, `backpressure`, `rate-limiting`, `horizontal-scaling`, `partitioning`, `cdn`.
+**Pattern vocabulary**: `externalize-session`, `stateless-service`, `object-storage`, `distributed-cache`, `cache-invalidation`, `distributed-lock`, `leader-election`, `async-offload`, `work-queue`, `pagination`, `read-replica`, `cqrs-read-model`, `backpressure`, `rate-limiting`, `horizontal-scaling`, `partitioning`, `cdn`, `drop-local-cache`, `consumer-concurrency`.
 
 ---
 
@@ -30,7 +30,7 @@ Grade against the profile's stated intent. A single-instance internal tool with 
 
 - **Signals**: Caffeine, Guava cache, `@Cacheable` with a simple or `ConcurrentMapCacheManager`, or a hand-rolled `Map` cache of data that other instances or services can change (prices, stock, user profiles), with no TTL or invalidation.
 - **Why it fails**: each instance serves its own stale copy. Updates on instance A never evict instance B's entry, so users see different prices on each refresh.
-- **Fix**: a short TTL if staleness is acceptable; `distributed-cache` (Redis) with `cache-invalidation` on write; or invalidation events.
+- **Fix**: `drop-local-cache` when the data is already loaded or cheap to read; a short TTL if staleness is acceptable; `distributed-cache` (Redis) with `cache-invalidation` on write; or invalidation events.
 - **Recommend when**: the data changes and correctness or user-visible consistency matters. Immutable or reference data with a TTL is clear.
 
 ### sc.scheduler-every-instance · Scheduled job runs on every instance
@@ -65,6 +65,13 @@ Grade against the profile's stated intent. A single-instance internal tool with 
 - **Why it fails**: throughput is capped by one lock or row no matter how many instances run, and `synchronized` does not even work across instances.
 - **Fix**: remove the shared lock, or replace it with row-level or DB constraints; `partitioning` of hot counters; `read-replica` or `cqrs-read-model` for read-heavy paths.
 - **Recommend when**: the contended path is on a hot flow.
+
+### sc.consumer-capacity · Message consumers sized below the load
+
+- **Signals**: listeners doing blocking work (remote calls, heavy writes) with default concurrency (one thread); topic partition counts undeclared or lower than replicas × threads; `max.poll.records` left at 500 with slow handlers; no `max.poll.interval.ms` tuning.
+- **Why it fails**: throughput is capped at partitions ÷ handler latency, so lag grows through every peak. Slow batches exceed the poll interval, and the group falls into rebalance loops.
+- **Fix**: `consumer-concurrency` (threads per pod, with partitions ≥ replicas × threads, declared in code or manifests), smaller poll batches, and `partitioning` by the aggregate key.
+- **Recommend when**: the consumer is on a business-critical flow and its handler blocks.
 
 ### sc.no-backpressure · No limit on incoming or queued work
 

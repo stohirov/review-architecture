@@ -2,11 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$comment": "Contract for architecture-findings.json. scripts/validate-findings.mjs interprets this file directly; keep to the keywords it supports.",
   "type": "object",
-  "required": ["schema_version", "mode", "target", "profile", "findings"],
+  "required": [
+    "schema_version",
+    "mode",
+    "target",
+    "profile",
+    "findings"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": 1 },
-    "mode": { "enum": ["codebase", "design", "hybrid"] },
+    "schema_version": {
+      "const": 1
+    },
+    "mode": {
+      "enum": [
+        "codebase",
+        "design",
+        "hybrid"
+      ]
+    },
     "target": {
       "type": "string",
       "minLength": 1,
@@ -14,18 +28,112 @@
     },
     "profile": {
       "type": "object",
-      "required": ["architecture", "summary"],
+      "required": [
+        "architecture",
+        "summary",
+        "stated_intent"
+      ],
       "additionalProperties": false,
       "properties": {
-        "architecture": { "enum": ["monolith", "modular-monolith", "microservices", "serverless", "unknown"] },
-        "summary": { "type": "string", "minLength": 1 },
-        "stack": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "deployables": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "datastores": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "messaging": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "architecture": {
+          "enum": [
+            "monolith",
+            "modular-monolith",
+            "microservices",
+            "serverless",
+            "unknown"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stated_intent": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Scale targets, SLAs and plans from the user or the repo's docs, or 'unknown'."
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Every decision made in place of asking the user."
+        },
+        "derived_load": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Peak rates per flow computed from the stated intent, e.g. '7,500 GPS writes/s at launch peak'."
+        },
+        "stack": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "deployables": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "One entry per deployable: 'name (path): responsibility'. Design mode: mark planned ones '(planned)'."
+        },
+        "datastores": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "'engine: name (used by a, b)'. Empty when there is none."
+        },
+        "messaging": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Broker and topics or queues. Empty when there is no broker."
+        },
+        "key_flows": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Business flows that cross a deployable or datastore boundary, as 'A -> B -> C'."
+        },
+        "background_work": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Schedulers, async executors and consumers, with where they run."
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Replicas and scaling, gateway, probes, tracing; or 'unknown'."
+        },
         "lenses_run": {
           "type": "array",
-          "items": { "enum": ["scalability", "data-consistency", "resilience", "service-boundaries", "messaging", "persistence", "operability"] }
+          "items": {
+            "enum": [
+              "scalability",
+              "data-consistency",
+              "resilience",
+              "service-boundaries",
+              "messaging",
+              "persistence",
+              "operability"
+            ]
+          }
         }
       }
     },
@@ -33,7 +141,20 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "lens", "title", "severity", "confidence", "locations", "evidence", "failure_scenario", "recommendation", "pattern", "applies_when", "effort"],
+        "required": [
+          "id",
+          "lens",
+          "title",
+          "severity",
+          "confidence",
+          "locations",
+          "evidence",
+          "failure_scenario",
+          "recommendation",
+          "pattern",
+          "applies_when",
+          "effort"
+        ],
         "additionalProperties": false,
         "properties": {
           "id": {
@@ -41,40 +162,104 @@
             "pattern": "^[A-Z]{2,5}-[0-9]{3}$",
             "description": "Lens prefix plus sequence, e.g. DC-001. Unique within the file."
           },
-          "lens": { "enum": ["scalability", "data-consistency", "resilience", "service-boundaries", "messaging", "persistence", "operability"] },
-          "title": { "type": "string", "minLength": 1 },
-          "severity": { "enum": ["critical", "high", "medium", "low", "info"] },
-          "confidence": { "enum": ["high", "medium", "low"] },
+          "lens": {
+            "enum": [
+              "scalability",
+              "data-consistency",
+              "resilience",
+              "service-boundaries",
+              "messaging",
+              "persistence",
+              "operability"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
           "locations": {
             "type": "array",
             "minItems": 1,
             "items": {
               "type": "object",
-              "required": ["file"],
+              "required": [
+                "file"
+              ],
               "additionalProperties": false,
               "properties": {
-                "file": { "type": "string", "minLength": 1, "description": "Repo-relative path, or the brief's filename in design mode." },
-                "line": { "type": "integer", "minimum": 1 },
-                "section": { "type": "string", "minLength": 1, "description": "Heading in the brief (design mode) or symbol name." }
+                "file": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Repo-relative path, or the brief's filename in design mode."
+                },
+                "line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "section": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Heading in the brief (design mode) or symbol name."
+                }
               }
             }
           },
-          "evidence": { "type": "string", "minLength": 1, "description": "Quoted code or brief text that shows the problem." },
-          "failure_scenario": { "type": "string", "minLength": 1, "description": "Concrete sequence of events that goes wrong." },
-          "recommendation": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Quoted code or brief text that shows the problem."
+          },
+          "failure_scenario": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Concrete sequence of events that goes wrong."
+          },
+          "recommendation": {
+            "type": "string",
+            "minLength": 1
+          },
           "pattern": {
             "type": "string",
             "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
             "description": "Kebab-case name of the recommended pattern, from the lens vocabulary, e.g. transactional-outbox."
           },
-          "applies_when": { "type": "string", "minLength": 1, "description": "The condition in this project that makes the recommendation proportionate." },
-          "effort": { "enum": ["small", "medium", "large"] }
+          "applies_when": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The condition in this project that makes the recommendation proportionate."
+          },
+          "effort": {
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ]
+          }
         }
       }
     },
     "strengths": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "description": "Things the architecture already does well."
     }
   }

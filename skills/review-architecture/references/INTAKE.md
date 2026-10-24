@@ -12,7 +12,7 @@ Most findings depend on scale and consistency needs, and briefs often leave thes
 4. **Team and deployment**: how many engineers and teams, and how often each part ships.
 5. **Availability**: the uptime target, and which flows must keep working when a dependency is down.
 
-Skip any question the brief already answers. If the user declines or doesn't know, assume a modest default (one team, about 100 requests per second peak, 99.9% availability), write the assumption into `stated intent` in the profile, and grade severities against it.
+Skip any question the brief already answers. If the user declines or doesn't know, assume a modest default (one team, about 100 requests per second peak, 99.9% availability), record it under `assumptions` in the profile, and grade severities against it. Turn the targets into peak rates per flow (for example, GPS writes per second) under `derived load`; the lenses grade against those numbers.
 
 ## Gaps are signals
 

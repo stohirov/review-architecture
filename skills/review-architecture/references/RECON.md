@@ -25,7 +25,7 @@ Build the **profile**: a compact picture of the system that every lens agent rec
 
 ## Profile format
 
-Keep it to 40 lines or fewer. It is pasted into every lens brief.
+Keep it to 40 lines or fewer. It is pasted into every lens brief, and its fields map one to one onto `profile` in `findings-schema.json` (the JSON uses snake_case keys and arrays for the list fields).
 
 ```
 architecture: <class>, <one-line reason>
@@ -38,6 +38,8 @@ messaging: <broker, topics or queues, or none>
 background work: <schedulers, async executors, and where>
 runtime: <replicas/scaling if declared, gateway, health checks, tracing>
 stated intent: <scale targets, SLAs, plans, or unknown>
+assumptions: <every decision you made in place of asking, or none>
+derived load: <design mode, or when stated intent gives numbers: peak rates per flow you computed>
 key flows: <1–3 business flows that cross a deployable or datastore boundary, as A -> B -> C>
 ```
 

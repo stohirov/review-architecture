@@ -2,7 +2,7 @@
 
 Can a crash, retry, timeout or concurrent request leave data wrong: an order without a payment, a charge without an order, stock counted twice? Trace transaction boundaries, and every point where one business operation touches more than one resource (two databases, a database and a broker, a database and a remote API).
 
-**Pattern vocabulary**: `transactional-outbox`, `saga-orchestration`, `saga-choreography`, `compensating-action`, `idempotency-key`, `idempotent-consumer`, `optimistic-locking`, `pessimistic-locking`, `after-commit-hook`, `move-call-outside-transaction`, `listen-to-yourself`, `reservation-pattern`.
+**Pattern vocabulary**: `transactional-outbox`, `saga-orchestration`, `saga-choreography`, `compensating-action`, `idempotency-key`, `idempotent-consumer`, `optimistic-locking`, `pessimistic-locking`, `after-commit-hook`, `move-call-outside-transaction`, `listen-to-yourself`, `reservation-pattern`, `atomic-conditional-update`, `input-validation`, `consistent-lock-ordering`.
 
 Each rule gives its signals, why it fails, the fix, when to recommend it, and the mitigations that clear it.
 
@@ -88,15 +88,22 @@ Each rule gives its signals, why it fails, the fix, when to recommend it, and th
   - Load an entity, change a counter or balance or stock field in Java, then save, with no `@Version`, no `SELECT … FOR UPDATE` (`@Lock(PESSIMISTIC_WRITE)`), and no atomic `UPDATE … SET x = x - :n WHERE x >= :n`.
   - A check-then-act on stock or balance ("if available ≥ qty then save").
 - **Why it fails**: two concurrent requests read the same value and both write, so one update is lost. This is overselling, or negative balances.
-- **Fix**: `optimistic-locking` (`@Version` and retry) for low contention; an atomic conditional `UPDATE` or `pessimistic-locking` for hot rows.
+- **Fix**: `optimistic-locking` (`@Version` and retry) for low contention; `atomic-conditional-update` (`UPDATE … SET x = x - :n WHERE x >= :n`, checking the row count) or `pessimistic-locking` for hot rows. When one transaction locks several hot rows, use `consistent-lock-ordering` (for example, sort by key) to avoid deadlocks.
 - **Recommend when**: the field is shared across concurrent requests (stock, balance, seat count). Per-user private data rarely needs it.
+
+### dc.unvalidated-input · Input that can break invariants
+
+- **Signals**: write endpoints or command handlers that take quantities, amounts, prices or state names from the caller with no validation (no `@Valid` or `@Positive`, no checks in the service); prices or totals taken from the client instead of the server's catalog; duplicate keys inside one request.
+- **Why it fails**: a negative quantity turns a decrement into an increment, a client-supplied price lets a caller set their own charge, and a duplicate line can break a unique constraint deep in a saga step, so the message dead-letters.
+- **Fix**: `input-validation` at the boundary (bean validation plus domain checks), and server-side pricing.
+- **Recommend when**: the input feeds money, stock or state transitions.
 
 ### dc.tx-boundary-misuse · Transactions that do not do what the code assumes
 
 - **Signals**:
   - A `@Transactional` method called from the same class (self-invocation bypasses the proxy).
+  - A `@Transactional` method that throws checked exceptions (for example Jackson's `JsonProcessingException`) without `rollbackFor`: Spring commits on checked exceptions, so earlier writes such as an inbox row persist.
   - `@Transactional` on a private method.
-  - Checked exceptions that do not trigger rollback (no `rollbackFor`).
   - A `try/catch` that swallows an exception inside a transaction, and so commits partial work.
   - A long transaction wrapping a batch loop or file processing.
 - **Why it fails**: writes the author believes are atomic are not, or a transaction holds locks and connections for minutes.

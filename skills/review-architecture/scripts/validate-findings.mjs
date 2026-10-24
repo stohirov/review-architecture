@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Validates architecture-findings.json against ../findings-schema.json.
-// Usage: node validate-findings.mjs <path-to-findings.json>
+// Usage: node validate-findings.mjs <path-to-findings.json> [--report <architecture-review.md>]
 // Interprets the subset of JSON Schema the schema uses, then applies
 // cross-field checks that are clearer in code.
 
@@ -110,6 +110,19 @@ function crossFieldChecks(doc, errors) {
   }
 }
 
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Every finding needs its own Markdown heading, e.g. "#### DC-001 · Title".
+export function checkReport(doc, markdown) {
+  if (!Array.isArray(doc?.findings)) return [];
+  return doc.findings
+    .filter((f) => typeof f?.id === "string")
+    .filter((f) => !new RegExp(`^#{2,6}\\s+${escapeRegExp(f.id)}\\b`, "mu").test(markdown))
+    .map((f) => `report: no heading for ${f.id}`);
+}
+
 export function validate(doc, schema = loadSchema()) {
   const errors = [];
   checkNode(doc, schema, "$", errors);
@@ -118,9 +131,12 @@ export function validate(doc, schema = loadSchema()) {
 }
 
 function main(argv) {
-  const file = argv[2];
-  if (!file) {
-    console.error("usage: validate-findings.mjs <path-to-findings.json>");
+  const args = argv.slice(2);
+  const reportIdx = args.indexOf("--report");
+  const reportPath = reportIdx >= 0 ? args.splice(reportIdx, 2)[1] : undefined;
+  const file = args[0];
+  if (!file || args.length !== 1 || (reportIdx >= 0 && !reportPath)) {
+    console.error("usage: validate-findings.mjs <path-to-findings.json> [--report <architecture-review.md>]");
     return 2;
   }
   let doc;
@@ -131,12 +147,19 @@ function main(argv) {
     return 1;
   }
   const errors = validate(doc);
+  if (reportPath) {
+    try {
+      errors.push(...checkReport(doc, readFileSync(reportPath, "utf8")));
+    } catch (err) {
+      errors.push(`${reportPath}: ${err.message}`);
+    }
+  }
   if (errors.length) {
     for (const e of errors) console.error(e);
     console.error(`${file}: ${errors.length} error(s)`);
     return 1;
   }
-  console.log(`${file}: valid (${doc.findings.length} finding(s))`);
+  console.log(`${file}: valid (${doc.findings.length} finding(s))${reportPath ? `; every finding has a heading in ${reportPath}` : ""}`);
   return 0;
 }
 

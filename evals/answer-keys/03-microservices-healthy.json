@@ -29,6 +29,6 @@
       "graceful-shutdown",
       "distributed-tracing"
     ],
-    "notes": "Every forbidden pattern is already implemented. A finding recommending one is a false positive unless it names a concrete gap in the existing implementation; review those by hand."
+    "notes": "Fails on any finding above max_severity. Every forbidden pattern is already implemented: findings that name one are listed as warnings and are false positives unless they point at a concrete gap in the existing implementation."
   }
 }

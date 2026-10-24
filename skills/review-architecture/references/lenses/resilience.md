@@ -36,10 +36,10 @@ When a dependency is slow, down or flapping, does the failure stay contained, or
 
 ### rs.sync-call-chain · Long synchronous call chains on the request path
 
-- **Signals**: a key flow where service A calls B synchronously, and B calls C (and C calls D) before A can respond, visible in the profile's key flows.
+- **Signals**: a user request path that blocks on two or more hops in sequence (A calls B, and B calls C or a third party, before A can respond), visible in the profile's key flows. A→B→third-party counts. Report it on its own even when `rs.no-timeouts` also fires: timeouts bound the wait, but this rule is about the multiplied availability and the coupling, and its fix is different.
 - **Why it fails**: availability multiplies (three services at 99.9% give about 99.7%), latency adds up, and any link's failure fails the whole request. This is the distributed-monolith shape.
 - **Fix**: `async-decoupling` (accept the request, then progress the flow through events or a saga), or cache or replicate the data A needs, so the chain shortens to one hop.
-- **Recommend when**: the chain is three or more services deep, or contains an unreliable third party.
+- **Recommend when**: the chain is three or more services deep, or ends in a third party the user must wait for.
 
 ### rs.no-bulkhead · Shared resources for unrelated dependencies
 

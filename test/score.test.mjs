@@ -26,7 +26,7 @@ function doc(findings, overrides = {}) {
     schema_version: 1,
     mode: "codebase",
     target: "fixture",
-    profile: { architecture: "microservices", summary: "test" },
+    profile: { architecture: "microservices", summary: "test", stated_intent: "unknown" },
     findings,
     ...overrides,
   };
@@ -80,14 +80,16 @@ test("passes when every must-detect key is found and reports bonus and unmatched
   assert.match(formatReport(r), /PASS/);
 });
 
-test("control keys fail on severity above the cap and on forbidden patterns", () => {
+test("control keys fail above the severity cap and warn on implemented patterns", () => {
   const control = { fixture: "control", mode: "codebase", expected: [], control: { max_severity: "medium", forbidden_patterns: ["transactional-outbox"] } };
   const r = score(doc([finding()]), control);
   assert.deepEqual(r.control.overSeverity, ["DC-001"]);
   assert.deepEqual(r.control.forbiddenPattern, ["DC-001"]);
   assert.equal(r.pass, false);
-  const clean = score(doc([finding({ severity: "low", pattern: "data-retention" })]), control);
-  assert.equal(clean.pass, true);
+  const warned = score(doc([finding({ severity: "medium" })]), control);
+  assert.equal(warned.pass, true);
+  assert.deepEqual(warned.control.forbiddenPattern, ["DC-001"]);
+  assert.match(formatReport(warned), /control warning/);
 });
 
 test("invalid findings files fail with validation errors", () => {

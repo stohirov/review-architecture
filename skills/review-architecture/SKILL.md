@@ -22,7 +22,7 @@ Everything below is relative to this skill's directory (the folder holding this 
 
 - **design**: the user describes a project or points at a brief, RFC or diagram, and there is no code to review.
 - **codebase**: the skill runs inside a repo with source code and the user gave no description.
-- **hybrid**: there is code and a stated intent (target scale, planned split, an RFC). Review the code, and also check it against the intent.
+- **hybrid**: there is code and a stated intent (target scale, planned split, an RFC), whether the user stated it or the repo's own README, docs or ADRs do. Review the code, and also check it against the intent.
 
 If the request fits none of these cleanly, ask one question.
 
@@ -33,7 +33,7 @@ Done when the mode is decided.
 - codebase or hybrid: follow `references/RECON.md`.
 - design: follow `references/INTAKE.md`, which also produces a profile.
 
-Done when every profile field is filled or marked `unknown` and the architecture is classified.
+Done when every profile field is filled or marked `unknown`, the architecture is classified, and every assumption you made is listed.
 
 ## 3. Select lenses
 
@@ -51,11 +51,15 @@ Record the chosen lenses as `profile.lenses_run`. Done when every lens is marked
 
 ## 4. Fan out lens agents
 
-Start one subagent per selected lens, **all in a single message** so they run in parallel. Build each prompt from `references/AGENT-BRIEF.md`.
+Start the lens agents **all in a single message** so they run in parallel. Build each prompt from `references/AGENT-BRIEF.md`. Size the fan-out to the codebase:
 
-For a large codebase (more than about 6 deployables or 400 source files), split `data-consistency` and `resilience` per group of services, and keep the total at about 10 agents or fewer.
+- **Small** (under about 150 source files, or design mode): group the lenses into at most three agents, each running every checklist in its group. The groups are `data-consistency` + `messaging`, `resilience` + `service-boundaries`, and `scalability` + `persistence` + `operability`, minus any skipped lens.
+- **Medium**: one agent per lens.
+- **Large** (more than about 6 deployables or 400 source files): one agent per lens, with `data-consistency` and `resilience` also split per group of services. Keep the total at about 10 agents or fewer.
 
-If the platform has no subagent tool, run each lens yourself in turn with the same brief.
+Keep working notes (the profile, raw candidate lists) in a temporary directory unique to this run, never in the project. Wait for every agent before step 5, and don't redo their work while they run.
+
+If some agents are refused, for example by a concurrency limit, launch them as earlier ones finish. Run a lens yourself only if it still cannot launch, and say so in the report's scope line. If the platform has no subagent tool, run each lens yourself in turn with the same brief.
 
 Done when every lens agent has returned its rule ledger and candidate list (the list may be empty).
 
@@ -66,7 +70,7 @@ Lens agents each see one lens and one slice of code. You see everything. For eve
 1. **Evidence**: open the cited location. The quoted evidence must be there. Correct the line number, or drop the candidate.
 2. **Mitigation**: search for a fix that lives elsewhere, such as a lock configured in another module, a global client timeout, an outbox relay, or a dedup table. If one exists, drop or downgrade the candidate.
 3. **Proportionality**: check `applies_when` against the profile. Drop recommendations the project's scale or shape does not justify.
-4. **Duplicates**: when two lenses report one root cause, keep the finding under the lens that owns the fix and fold the other's angle into it.
+4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the ownership table in `references/AGENT-BRIEF.md`, and fold the other angle into it.
 5. **Severity**: re-grade against the scale in `references/AGENT-BRIEF.md`. A critical or high finding needs medium or high confidence after your own reading.
 
 Assign ids by lens prefix and sequence: `SC` scalability, `DC` data-consistency, `RS` resilience, `SB` service-boundaries, `MQ` messaging, `PS` persistence, `OP` operability (for example `DC-001`).
@@ -81,8 +85,8 @@ Write two files:
 
 In codebase and hybrid mode they go in the project root; in design mode, the current directory. Use another location if the user names one.
 
-Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json` and fix the file until it exits 0.
+Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json --report <path>/architecture-review.md`, and fix both files until it exits 0. The `--report` check confirms that every finding has its heading in the Markdown.
 
-Done when the validator passes and every finding in the JSON appears in the Markdown report.
+Done when the validator passes with `--report`.
 
 Close in chat with: the architecture in one line, finding counts by severity, the top three findings, and both file paths. Offer to go deeper on any finding or to implement a fix.

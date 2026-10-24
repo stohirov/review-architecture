@@ -4,7 +4,7 @@ Can this system be deployed, scaled and debugged in production without heroics? 
 
 Security is out of scope beyond architecture-level gaps (secrets in source, no auth boundary). Point to a dedicated security review for depth.
 
-**Pattern vocabulary**: `health-probes`, `graceful-shutdown`, `externalized-config`, `secrets-manager`, `distributed-tracing`, `correlation-id`, `structured-logging`, `metrics-and-alerts`, `immutable-artifacts`, `rolling-deploy-compatibility`, `api-gateway`.
+**Pattern vocabulary**: `health-probes`, `graceful-shutdown`, `externalized-config`, `secrets-manager`, `distributed-tracing`, `correlation-id`, `structured-logging`, `metrics-and-alerts`, `immutable-artifacts`, `rolling-deploy-compatibility`, `api-gateway`, `resource-requests-and-disruption-budget`, `startup-probe`.
 
 ---
 
@@ -49,6 +49,13 @@ Security is out of scope beyond architecture-level gaps (secrets in source, no a
 - **Why it fails**: cross-cutting policy drifts between services, clients are coupled to internal topology, and internal services are exposed.
 - **Fix**: an `api-gateway` or ingress handling routing, auth and rate limits, with internal services kept off the public network.
 - **Recommend when**: several services are reached by external clients.
+
+### op.no-resource-policy · Pods without resources or disruption limits
+
+- **Signals**: k8s Deployments with no CPU or memory `requests`/`limits`; an HPA on CPU utilization with no CPU request (it cannot compute utilization); no `PodDisruptionBudget`; no topology spread for replicated services; slow startup (migrations at boot) with no `startupProbe`.
+- **Why it fails**: the scheduler overpacks nodes, the HPA never scales, node drains take every replica down at once, and slow starts crash-loop under liveness checks.
+- **Fix**: `resource-requests-and-disruption-budget` (requests and limits, a PDB, spread constraints) and a `startup-probe`.
+- **Recommend when**: running on k8s with more than one replica or an HPA.
 
 ### op.unsafe-rolling-deploy · Versions that cannot run side by side
 

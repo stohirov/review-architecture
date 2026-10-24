@@ -4,7 +4,7 @@ Are the units of deployment, and the modules inside a monolith, split along busi
 
 Proportionality matters most here. **Do not recommend splitting a monolith into microservices** unless the profile shows the forces that justify it: several teams blocked on each other, parts with very different scaling or availability needs, or deploy contention. For a small team, recommend a **modular monolith** instead.
 
-**Pattern vocabulary**: `database-per-service`, `api-composition`, `data-replication-via-events`, `merge-services`, `modular-monolith`, `bounded-context`, `anti-corruption-layer`, `consumer-driven-contracts`, `api-versioning`, `strangler-fig`, `backend-for-frontend`.
+**Pattern vocabulary**: `database-per-service`, `api-composition`, `data-replication-via-events`, `merge-services`, `modular-monolith`, `bounded-context`, `anti-corruption-layer`, `consumer-driven-contracts`, `api-versioning`, `strangler-fig`, `backend-for-frontend`, `dto-boundary`.
 
 ---
 
@@ -50,7 +50,7 @@ Proportionality matters most here. **Do not recommend splitting a monolith into 
   - Modules in a monolith reaching into another module's repositories or internal packages.
   - No anti-corruption mapping around a third-party API.
 - **Why it fails**: internal refactors become breaking API changes. In a monolith, the module structure erodes until everything depends on everything.
-- **Fix**: DTOs and versioned contracts (`api-versioning`); module APIs with internal packages hidden (Spring Modulith, ArchUnit, Java modules); an `anti-corruption-layer` for third parties.
+- **Fix**: `dto-boundary` (DTOs at every API and topic) with versioned contracts (`api-versioning`); module APIs with internal packages hidden (Spring Modulith, ArchUnit, Java modules); an `anti-corruption-layer` for third parties.
 - **Recommend when**: the model crosses a team or deploy boundary, or the monolith has several business modules.
 
 ### sb.premature-split · Microservices without the forces that justify them

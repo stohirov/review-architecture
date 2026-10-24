@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validate } from "../skills/review-architecture/scripts/validate-findings.mjs";
+import { validate, checkReport } from "../skills/review-architecture/scripts/validate-findings.mjs";
 
 const SCRIPT = new URL("../skills/review-architecture/scripts/validate-findings.mjs", import.meta.url).pathname;
 
@@ -31,7 +31,14 @@ function doc(overrides = {}) {
     schema_version: 1,
     mode: "codebase",
     target: "fixtures/02",
-    profile: { architecture: "microservices", summary: "Three Spring Boot services.", lenses_run: ["data-consistency"] },
+    profile: {
+      architecture: "microservices",
+      summary: "Three Spring Boot services.",
+      stated_intent: "300 orders/min, 3x next year",
+      assumptions: ["one team per service"],
+      key_flows: ["order -> payment -> PSP"],
+      lenses_run: ["data-consistency"],
+    },
     findings: [finding()],
     ...overrides,
   };
@@ -105,4 +112,28 @@ test("CLI exits 0 for valid and 1 for invalid files", () => {
   writeFileSync(bad, JSON.stringify(doc({ mode: "nope" })));
   assert.match(execFileSync("node", [SCRIPT, good], { encoding: "utf8" }), /valid \(1 finding/);
   assert.throws(() => execFileSync("node", [SCRIPT, bad], { stdio: "pipe" }), (err) => err.status === 1);
+});
+
+test("profile requires stated intent and rejects unknown fields", () => {
+  const { stated_intent, ...profile } = doc().profile;
+  assert.ok(validate(doc({ profile })).some((e) => e.includes('missing required "stated_intent"')));
+  assert.ok(validate(doc({ profile: { ...doc().profile, mood: "ok" } })).some((e) => e.includes('unexpected property "mood"')));
+});
+
+test("checkReport requires a heading per finding", () => {
+  const d = doc({ findings: [finding(), finding({ id: "DC-002" })] });
+  assert.deepEqual(checkReport(d, "## Findings\n### High\n#### DC-001 · HTTP call\n#### DC-002 · Other\n"), []);
+  assert.deepEqual(checkReport(d, "#### DC-001 · HTTP call\nsee DC-002 below\n"), ["report: no heading for DC-002"]);
+  assert.deepEqual(checkReport(d, "#### DC-0012 · near miss\n#### DC-001 · ok\n"), ["report: no heading for DC-002"]);
+});
+
+test("CLI --report fails when a finding has no heading", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ra-report-"));
+  const json = join(dir, "f.json");
+  const md = join(dir, "r.md");
+  writeFileSync(json, JSON.stringify(doc()));
+  writeFileSync(md, "# Review\n");
+  assert.throws(() => execFileSync("node", [SCRIPT, json, "--report", md], { stdio: "pipe" }), (err) => err.status === 1);
+  writeFileSync(md, "# Review\n#### DC-001 · HTTP call inside @Transactional\n");
+  assert.match(execFileSync("node", [SCRIPT, json, "--report", md], { encoding: "utf8" }), /every finding has a heading/);
 });

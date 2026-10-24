@@ -2,8 +2,6 @@
 
 Does asynchronous communication deliver what the business needs, despite redelivery, poison messages, reordering, consumer lag and broker outages? Read producer config, consumer config and listener code together.
 
-Publishing reliability (the outbox) and consumer idempotency are owned by the data-consistency lens (`dc.dual-write`, `dc.non-idempotent-consumer`). Report them here only if that lens is not running.
-
 **Pattern vocabulary**: `dead-letter-queue`, `retry-topic`, `manual-ack-after-processing`, `partition-by-aggregate-key`, `idempotent-producer`, `schema-registry`, `event-versioning`, `consumer-lag-monitoring`, `event-carried-state-transfer`, `competing-consumers`.
 
 ---
