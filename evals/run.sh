@@ -26,7 +26,7 @@ else
   prompt="Review the architecture of this codebase using the review-architecture skill. Nobody is available to answer questions: decide and continue. Write the report files to the project root."
 fi
 
-(cd "$work" && claude -p "$prompt" --plugin-dir "$repo" --permission-mode acceptEdits)
+(cd "$work" && claude -p "$prompt" --plugin-dir "$repo/plugins/review-architecture" --permission-mode acceptEdits)
 
 out="$repo/evals/results/$fixture"
 mkdir -p "$out"

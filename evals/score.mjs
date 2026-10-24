@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { basename } from "node:path";
-import { validate, checkReport, checkBrief } from "../skills/review-architecture/scripts/validate-findings.mjs";
+import { validate, checkReport, checkBrief } from "../plugins/review-architecture/skills/review-architecture/scripts/validate-findings.mjs";
 
 const SEVERITY_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
 

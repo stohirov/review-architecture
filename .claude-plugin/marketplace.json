@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "review-architecture",
-      "source": "./",
+      "source": "./plugins/review-architecture",
       "description": "Reviews a codebase or project description for system-design mistakes (scalability, data consistency, resilience, service boundaries, messaging) and recommends proportional fixes.",
       "category": "engineering",
       "keywords": [

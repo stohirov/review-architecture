@@ -17,7 +17,7 @@ Recommendations are **proportional**. Every finding names the condition in your 
 Or, for one session from a local clone:
 
 ```
-claude --plugin-dir /path/to/review-architecture
+claude --plugin-dir /path/to/review-architecture/plugins/review-architecture
 ```
 
 ## Use
@@ -31,7 +31,7 @@ claude --plugin-dir /path/to/review-architecture
 The skill writes two files:
 
 - `architecture-review.md`: summary, architecture diagram (Mermaid), findings by severity with evidence and failure scenarios, a now/next/later roadmap, and what's already sound
-- `architecture-findings.json`: the same findings, machine-readable and checked by `skills/review-architecture/scripts/validate-findings.mjs`
+- `architecture-findings.json`: the same findings, machine-readable and checked by `plugins/review-architecture/skills/review-architecture/scripts/validate-findings.mjs`
 
 ## How it works
 
@@ -50,7 +50,7 @@ flowchart LR
   E --> F[Report + validate]
 ```
 
-The lens agents run in parallel. Each works through a checklist in `skills/review-architecture/references/lenses/`, where every rule lists its signals, why the mistake fails, the fix, when (and when not) to recommend it, and the mitigations that clear it. The parent agent then re-reads the evidence for every critical and high finding before it reaches the report.
+The lens agents run in parallel. Each works through a checklist in `plugins/review-architecture/skills/review-architecture/references/lenses/`, where every rule lists its signals, why the mistake fails, the fix, when (and when not) to recommend it, and the mitigations that clear it. The parent agent then re-reads the evidence for every critical and high finding before it reaches the report.
 
 | Lens | Looks for |
 |---|---|

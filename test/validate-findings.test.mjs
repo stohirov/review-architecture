@@ -4,9 +4,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validate, checkReport, checkBrief } from "../skills/review-architecture/scripts/validate-findings.mjs";
+import { validate, checkReport, checkBrief } from "../plugins/review-architecture/skills/review-architecture/scripts/validate-findings.mjs";
 
-const SCRIPT = new URL("../skills/review-architecture/scripts/validate-findings.mjs", import.meta.url).pathname;
+const SCRIPT = new URL("../plugins/review-architecture/skills/review-architecture/scripts/validate-findings.mjs", import.meta.url).pathname;
 
 function finding(overrides = {}) {
   return {
