@@ -1,0 +1,94 @@
+{
+  "fixture": "01-monolith-unscalable",
+  "mode": "codebase",
+  "expected": [
+    {
+      "key": "session-state",
+      "description": "Cart kept in HttpSession with no shared session store, while 3-12 replicas run",
+      "lenses": ["scalability"],
+      "files": ["CartController.java", "OrderController.java"],
+      "keywords": ["session"],
+      "must_detect": true
+    },
+    {
+      "key": "local-filesystem",
+      "description": "Product images written to a pod-local emptyDir and served back from it",
+      "lenses": ["scalability"],
+      "files": ["ProductImageController.java", "deployment.yaml"],
+      "keywords": ["file|disk|storage|emptyDir|volume"],
+      "must_detect": true
+    },
+    {
+      "key": "scheduler-no-lock",
+      "description": "Monthly invoice @Scheduled job runs on every replica with no distributed lock",
+      "lenses": ["scalability"],
+      "files": ["MonthlyInvoiceJob.java"],
+      "keywords": ["schedul|lock|replica|instance"],
+      "must_detect": true
+    },
+    {
+      "key": "local-price-cache",
+      "description": "ConcurrentHashMap price cache updated only on the instance that served the write",
+      "lenses": ["scalability"],
+      "files": ["ProductService.java"],
+      "keywords": ["cache"],
+      "must_detect": true
+    },
+    {
+      "key": "unbounded-findall",
+      "description": "GET /api/products returns findAll() with no pagination",
+      "lenses": ["scalability", "persistence"],
+      "files": ["ProductService.java", "ProductController.java"],
+      "keywords": ["findAll|paginat|unbounded|Pageable"],
+      "must_detect": true
+    },
+    {
+      "key": "n-plus-one",
+      "description": "Order history maps lazy lines and products per order",
+      "lenses": ["persistence"],
+      "files": ["OrderController.java", "OrderService.java", "OrderRepository.java", "CustomerOrder.java", "OrderLine.java"],
+      "keywords": ["n\\s*\\+\\s*1|lazy|fetch"],
+      "must_detect": true
+    },
+    {
+      "key": "sync-email",
+      "description": "Order confirmation email sent synchronously over SMTP in the checkout request",
+      "lenses": ["scalability", "resilience", "data-consistency"],
+      "files": ["OrderService.java"],
+      "keywords": ["mail|smtp"],
+      "must_detect": true
+    },
+    {
+      "key": "open-in-view",
+      "description": "spring.jpa.open-in-view not disabled (defaults to true)",
+      "lenses": ["persistence"],
+      "files": ["application.yml"],
+      "keywords": ["open.?in.?view|osiv"],
+      "must_detect": true
+    },
+    {
+      "key": "stock-lost-update",
+      "description": "Check-then-decrement of stock with no @Version or atomic update; concurrent checkouts oversell",
+      "lenses": ["data-consistency"],
+      "files": ["OrderService.java", "Product.java"],
+      "keywords": ["stock", "concurren|lost.update|race|lock|oversell|version"],
+      "must_detect": true
+    },
+    {
+      "key": "ddl-auto-update",
+      "description": "Schema managed by ddl-auto=update, no migrations",
+      "lenses": ["persistence", "operability"],
+      "files": ["application.yml"],
+      "keywords": ["ddl|migration|flyway|liquibase"],
+      "must_detect": false
+    },
+    {
+      "key": "invoice-job-long-tx",
+      "description": "Invoice job sends every email inside one long transaction; a failure midway re-sends on the next run",
+      "lenses": ["data-consistency", "scalability"],
+      "files": ["MonthlyInvoiceJob.java"],
+      "keywords": ["transaction|tx"],
+      "must_detect": false
+    }
+  ]
+}

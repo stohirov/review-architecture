@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: shopfront
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:5432/shopfront
+    username: ${DB_USER:shop}
+    password: ${DB_PASSWORD:shop}
+  jpa:
+    hibernate:
+      ddl-auto: update
+  mail:
+    host: ${SMTP_HOST:smtp.mailprovider.com}
+    port: 587
+    username: ${SMTP_USER}
+    password: ${SMTP_PASSWORD}
+
+shopfront:
+  media-dir: /var/shopfront/uploads
+  invoice-from: billing@shopfront.example
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
