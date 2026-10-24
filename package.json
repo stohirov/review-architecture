@@ -1,0 +1,14 @@
+{
+  "name": "review-architecture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Architecture review and recommendation skill for AI agents",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
