@@ -34,6 +34,11 @@ spring:
       ack-mode: record
   lifecycle:
     timeout-per-shutdown-phase: 30s
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${AUTH_ISSUER_URI}
 
 server:
   shutdown: graceful

@@ -6,6 +6,8 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -33,7 +35,7 @@ public class OrderController {
         this.orders = orders;
     }
 
-    public record PlaceOrderRequest(String customerId, List<OrderService.Line> lines) {
+    public record PlaceOrderRequest(List<OrderService.Line> lines) {
     }
 
     public record OrderView(UUID id, String status, BigDecimal total, String cancelReason) {
@@ -44,23 +46,26 @@ public class OrderController {
 
     /** Returns 202: the saga completes asynchronously; clients poll GET /orders/{id}. */
     @PostMapping
-    public ResponseEntity<OrderView> place(@RequestHeader("Idempotency-Key") String idempotencyKey,
+    public ResponseEntity<OrderView> place(@AuthenticationPrincipal Jwt customer,
+                                           @RequestHeader("Idempotency-Key") String idempotencyKey,
                                            @RequestBody PlaceOrderRequest request) {
-        Order order = orderService.placeOrder(idempotencyKey, request.customerId(), request.lines());
+        Order order = orderService.placeOrder(idempotencyKey, customer.getSubject(), request.lines());
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(OrderView.of(order));
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<OrderView> get(@PathVariable UUID id) {
-        return orders.findWithItemsById(id).map(OrderView::of).map(ResponseEntity::ok)
+    public ResponseEntity<OrderView> get(@AuthenticationPrincipal Jwt customer, @PathVariable UUID id) {
+        return orders.findById(id)
+                .filter(o -> o.getCustomerId().equals(customer.getSubject()))
+                .map(OrderView::of).map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
 
     @GetMapping
-    public Page<OrderView> byCustomer(@RequestParam String customerId,
+    public Page<OrderView> mine(@AuthenticationPrincipal Jwt customer,
                                       @RequestParam(defaultValue = "0") int page,
                                       @RequestParam(defaultValue = "20") int size) {
-        return orders.findByCustomerIdOrderByCreatedAtDesc(customerId, PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE)))
+        return orders.findByCustomerIdOrderByCreatedAtDesc(customer.getSubject(), PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE)))
                 .map(OrderView::of);
     }
 }

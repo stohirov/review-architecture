@@ -30,13 +30,14 @@ public class OrderService {
     }
 
     /**
-     * Idempotent on {@code requestKey}: a retried request returns the order created by the first attempt.
+     * Idempotent per customer on {@code requestKey}: a retried request returns the order created by the first attempt.
      */
     @Transactional
     public Order placeOrder(String requestKey, String customerId, List<Line> lines) {
         validate(lines);
-        return orders.findByRequestKey(requestKey).orElseGet(() -> {
-            Order order = new Order(requestKey, customerId);
+        String scopedKey = customerId + ":" + requestKey;
+        return orders.findByRequestKey(scopedKey).orElseGet(() -> {
+            Order order = new Order(scopedKey, customerId);
             lines.forEach(l -> order.addItem(l.sku(), l.quantity(), priceOf(l.sku())));
             orders.save(order);
             saga.start(order);

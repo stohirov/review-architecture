@@ -10,7 +10,7 @@ Three Spring Boot services, each owning its own database:
 
 Place-order flow (orchestrated saga, all steps over Kafka through per-service transactional outboxes):
 
-1. `POST /orders` (idempotent on `Idempotency-Key`) stores the order as `PENDING` and, in the same transaction, queues `ReserveStock`.
+1. `POST /orders` (customer from the JWT subject; idempotent per customer on `Idempotency-Key`) stores the order as `PENDING` and, in the same transaction, queues `ReserveStock`.
 2. Inventory answers `StockReserved` or `StockRejected`. Orders with no reply after 15 minutes are cancelled by the saga watchdog, which also sends `ReleaseStock`.
 3. On `StockReserved` the saga sends `ChargePayment`; payment answers `PaymentCaptured` or `PaymentFailed`.
 4. `PaymentFailed` triggers `ReleaseStock` and the order is `CANCELLED`; `PaymentCaptured` confirms it.

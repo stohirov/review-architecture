@@ -6,10 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 
 /**
- * Not transactional on purpose: the PSP call happens outside any DB transaction. Transient PSP
- * failures (timeouts, open circuit) propagate so the container's error handler retries with
+ * Not transactional on purpose: the PSP call happens outside any DB transaction. A PSP 4xx is a
+ * final decline and becomes PaymentFailed. Transient PSP failures (timeouts, 5xx, open circuit) propagate so the container's error handler retries with
  * backoff and finally dead-letters the command.
  */
 @Component
@@ -34,7 +35,13 @@ public class PaymentCommandListener {
             return;
         }
         Messages.ChargePayment command = json.readValue(record.value(), Messages.ChargePayment.class);
-        PspClient.CaptureResponse response = psp.capture("capture-" + command.orderId(), command.customerId(), command.amount());
+        PspClient.CaptureResponse response;
+        try {
+            response = psp.capture("capture-" + command.orderId(), command.customerId(), command.amount());
+        } catch (HttpClientErrorException rejected) {
+            // A 4xx is the PSP's final answer (card declined, invalid request): fail the payment, don't retry.
+            response = new PspClient.CaptureResponse(null, "rejected_" + rejected.getStatusCode().value());
+        }
         recorder.record(messageId, command, response);
     }
 }

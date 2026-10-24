@@ -73,6 +73,8 @@ resilience4j:
         failure-rate-threshold: 50
         slow-call-duration-threshold: 2s
         wait-duration-in-open-state: 30s
+        ignore-exceptions:
+          - org.springframework.web.client.HttpClientErrorException
   retry:
     instances:
       psp:
@@ -81,3 +83,5 @@ resilience4j:
         enable-exponential-backoff: true
         exponential-backoff-multiplier: 2
         enable-randomized-wait: true
+        ignore-exceptions:
+          - org.springframework.web.client.HttpClientErrorException

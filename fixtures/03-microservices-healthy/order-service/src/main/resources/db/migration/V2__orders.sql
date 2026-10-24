@@ -1,6 +1,6 @@
 create table orders (
     id              uuid primary key,
-    request_key     varchar(100) not null unique,
+    request_key     varchar(200) not null unique,
     customer_id     varchar(64)  not null,
     total           numeric(12, 2) not null,
     status          varchar(20)  not null,
