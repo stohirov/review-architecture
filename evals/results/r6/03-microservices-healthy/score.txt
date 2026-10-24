@@ -1,0 +1,25 @@
+03-microservices-healthy: FAIL
+  findings: 19
+  recall: 0/0 (100%)
+  control: above max severity: RS-001
+  control warning (check by hand): names an implemented pattern: RS-001, DC-001, OP-002, DC-002, MQ-001, OP-005
+  not in answer key (review by hand):
+    ? RS-001 [high] JWT issuer discovery and JWKS fetch run on a `RestTemplate` with no timeouts, on the request thread of every authenticated call
+    ? DC-001 [medium] A `ChargePayment` redriven from `payment-commands-dlt` relies only on the PSP's idempotency-key retention to avoid a second capture
+    ? SB-001 [medium] External pricing back office writes `price_list` directly in order-service's database
+    ? SC-001 [medium] Outbox relay is a cluster-wide singleton that sends and marks one message at a time, so throughput does not grow with replicas
+    ? SC-002 [medium] `payment-commands` allows at most 12 concurrent blocking PSP calls, close to next year's peak
+    ? PS-001 [medium] Connection pools for 9 pods would use the whole default `max_connections` if production shares one Postgres server as compose does
+    ? OP-001 [medium] Deployments have no resource requests or limits, no PodDisruptionBudget, no spread constraints and no startupProbe
+    ? OP-002 [medium] Trace context does not flow through the outbox or Kafka, so one order's saga cannot be followed across services
+    ? OP-003 [medium] No metric or alert on outbox backlog, so a stalled relay shows up first as mass watchdog cancellations
+    ? OP-004 [medium] `kafka_dlt_records_total` series are created lazily, so a rate-based alert misses the first dead letter on each pod
+    ? DC-002 [low] Concurrent retries of `POST /orders` with the same `Idempotency-Key` return 500 instead of the original order
+    ? DC-003 [low] Multi-line stock reservations lock `stock_items` rows in client line order and can deadlock
+    ? MQ-001 [low] Deterministic poison messages other than JSON errors are retried for ~3 minutes before dead-lettering, stalling their partition
+    ? MQ-002 [low] The add-only message contract is copied by hand into each service and not enforced, so a rename becomes silent nulls
+    ? MQ-003 [low] Topics are created with RF 3 but no `min.insync.replicas`, so an `acks=all` send can be acknowledged by the leader alone
+    ? PS-002 [low] Outbox purge deletes a full day of rows in one statement, unlike the chunked inbox purge
+    ? OP-005 [low] No preStop delay before graceful shutdown, so order-service refuses requests while endpoints update
+    ? OP-006 [low] `/actuator/prometheus` is open to anonymous callers on order-service's public API port
+    ? OP-007 [low] docker-compose does not set the placeholders the services require, so the local stack cannot start

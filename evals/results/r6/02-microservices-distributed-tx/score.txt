@@ -1,0 +1,27 @@
+02-microservices-distributed-tx: PASS
+  findings: 27
+  recall: 11/11 (100%)
+    + http-in-tx-order <- DC-003
+    + http-in-tx-payment <- DC-004
+    + dual-write-no-outbox <- DC-002, DC-003, DC-005
+    + no-saga-compensation <- DC-002
+    + non-idempotent-consumer <- DC-002, DC-006
+    + auto-commit-offsets <- MQ-002
+    + no-dlq <- MQ-001, MQ-002
+    + no-timeouts <- RS-001, RS-002, RS-004
+    + shared-database <- SB-001
+    + unsafe-retries <- DC-001, RS-002
+    + sync-call-chain <- RS-002, SB-002
+  bonus: stock-lost-update, no-circuit-breaker, no-tracing, ddl-auto-update
+  not in answer key (review by hand):
+    ? DC-008 [high] POST `/orders` has no idempotency key: a client or gateway retry creates a second order and a second charge
+    ? DC-009 [high] Price and quantity come from the client unvalidated: the caller sets its own charge, and a negative quantity adds stock
+    ? OP-001 [high] No graceful shutdown (Boot 3.3 defaults to immediate), so every rolling deploy can cut in-flight orders after the PSP has captured
+    ? OP-002 [high] Order and payment endpoints trust a caller-supplied `customerId`, and POST `/payments` has no service authentication
+    ? RS-003 [medium] No circuit breaker around payment-service or the PSP; during an outage every order waits out the full timeout
+    ? MQ-003 [medium] The `OrderPaidEvent` contract is unversioned and hand-copied into each independently deployed service
+    ? PS-002 [medium] `order_items.order_id` has no index, so every `order-events` message scans a table that grows with every order
+    ? PS-003 [medium] Default Hikari pool of 10 per pod is sized against neither the shared Postgres connection limit nor transactions held across remote calls
+    ? SC-001 [medium] `order-events` is never declared and auto-creates with 1 partition, so 5 of the 6 listener threads sit idle
+    ? OP-004 [medium] No metrics registry or alerts: consumer lag, PSP latency and errors, and pool saturation are invisible
+    ? OP-005 [medium] One shared datasource login, `platform/platform`, committed in every service's `application.yml`

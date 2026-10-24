@@ -1,0 +1,18 @@
+04-design-brief: PASS
+  findings: 25
+  recall: 6/6 (100%)
+    + shared-database <- SB-001, SB-002
+    + sync-payment-in-booking <- DC-001, DC-002, DC-005, DC-006, DC-007, RS-001, RS-002, RS-003, SC-002, RS-004
+    + remote-calls-in-tx <- DC-001, DC-003, DC-004, DC-005, DC-006
+    + location-write-hotspot <- SC-001, SC-002, PS-001, PS-002, SC-004
+    + matching-in-memory-state <- SC-001, RS-001, SC-002
+    + trip-completed-dual-write <- DC-001, DC-003, DC-004, DC-006
+  bonus: notification-on-critical-path, no-saga-booking, payment-consumer-idempotency
+  not in answer key (review by hand):
+    ? MQ-001 [high] `TripCompleted` consumers have no retry topic or DLT, so a Stripe outage or a poison event silently drops captures
+    ? MQ-002 [medium] `TripCompleted` contract has no schema or versioning, although three consumers ship independently
+    ? PS-003 [medium] `rides` and the payment and notification records grow forever, with no retention or partitioning
+    ? SC-003 [medium] TripCompleted capture consumer blocks on Stripe, and no partition count or consumer concurrency is declared
+    ? OP-001 [medium] Runtime undecided: no probes, graceful shutdown, resource requests or disruption budgets against a 99.95% target
+    ? OP-002 [medium] No distributed tracing across a 5-service synchronous booking chain plus Kafka fan-out
+    ? OP-003 [medium] No metrics, alerts or SLO measurement for the 99.95% target, consumer lag, Stripe latency or DB health
