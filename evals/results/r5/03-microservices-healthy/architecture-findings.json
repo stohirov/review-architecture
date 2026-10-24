@@ -1,0 +1,425 @@
+{
+  "schema_version": 1,
+  "mode": "hybrid",
+  "target": "/private/tmp/claude-501/-Users-sukhob-opensource/ed547ec9-3380-41b5-9396-709ba7bd24d0/scratchpad/evals-r5/03-microservices-healthy",
+  "profile": {
+    "architecture": "microservices",
+    "summary": "Order platform (v2): order-service takes customer orders over REST and orchestrates a place-order saga (reserve stock, then charge) with inventory-service and payment-service. Commands and replies go over Kafka through a transactional outbox and inbox in each service; payment-service calls an external PSP.",
+    "stated_intent": "README: 3 replicas per service on k8s; peak ~300 orders/minute, expected to triple next year; failed messages retried ~3 minutes then dead-lettered to <topic>-dlt; every DLT record pages on-call; orders with no stock reply after 15 minutes are cancelled.",
+    "assumptions": [
+      "Mode is hybrid: there is code, and the README states scale and operational intent.",
+      "Nobody was available to answer questions, so the review has no user-imposed scope limits.",
+      "Infrastructure not in the repo (ingress or gateway, production Postgres sizing, Kafka cluster settings, alert rules) is assumed to exist as the README describes but is unverified; findings that depend on it are capped at medium confidence.",
+      "The PSP's exact HTTP contract (which 4xx codes it returns for in-flight idempotency keys, rate limits and auth failures, and how long it keeps idempotency keys) is not in the repo; common PSP behaviour (Stripe-style) is assumed."
+    ],
+    "derived_load": [
+      "~5 orders/s at today's peak (300/min), ~15 orders/s next year (900/min)",
+      "~3 outbox rows per order in order-service (ReserveStock, ChargePayment, OrderConfirmed/Cancelled): ~15 rows/s today, ~45 rows/s next year",
+      "~5-7 Kafka messages per order across the whole saga: ~35 msgs/s today, ~100 msgs/s next year"
+    ],
+    "stack": [
+      "Java 17",
+      "Spring Boot 3.3.4 (web, data-jpa, actuator, oauth2-resource-server)",
+      "Spring Kafka",
+      "Flyway",
+      "PostgreSQL 16",
+      "Kafka 3.7 (KRaft)",
+      "ShedLock 5.16 (JDBC)",
+      "Resilience4j (payment-service)",
+      "Micrometer tracing with OTel bridge and OTLP exporter",
+      "Micrometer Prometheus registry"
+    ],
+    "deployables": [
+      "order-service (order-service/): REST /orders with JWT auth, saga orchestrator, saga watchdog; db=postgres orders; publishes inventory-commands, payment-commands, order-events; consumes inventory-events, payment-events",
+      "inventory-service (inventory-service/): stock levels and reservations; db=postgres inventory; publishes inventory-events; consumes inventory-commands",
+      "payment-service (payment-service/): payments and PSP capture over HTTPS (RestClient, 1s/3s timeouts, circuit breaker, retry); db=postgres payments; publishes payment-events; consumes payment-commands (concurrency 4)"
+    ],
+    "datastores": [
+      "postgres: orders (used by order-service; also written by an external pricing back office via table price_list)",
+      "postgres: inventory (used by inventory-service)",
+      "postgres: payments (used by payment-service)",
+      "All three databases live on one Postgres server in docker-compose; the production layout is not in the repo"
+    ],
+    "messaging": [
+      "Kafka: inventory-commands, payment-commands, order-events (produced by order-service)",
+      "Kafka: inventory-events (inventory-service), payment-events (payment-service)",
+      "Kafka: <topic>-dlt for each topic; 12 partitions, replication factor 3; keyed by orderId; String JSON payloads with message-id and message-type headers"
+    ],
+    "key_flows": [
+      "client -> order-service POST /orders (one tx: order row + outbox ReserveStock) -> inventory-commands -> inventory-service (reserve stock + outbox StockReserved/StockRejected) -> inventory-events -> order-service saga",
+      "order-service saga (StockReserved) -> payment-commands -> payment-service -> PSP capture -> payment-events -> order-service (confirm, or cancel + ReleaseStock -> inventory-service)",
+      "order-service SagaWatchdog: PENDING > 15 min -> cancel + ReleaseStock -> inventory-service"
+    ],
+    "background_work": [
+      "OutboxRelay in each service: @Scheduled every 500 ms, ShedLock 'outbox-relay', batch 100",
+      "Outbox purge (03:15) and inbox purge (03:45) nightly in each service, ShedLock",
+      "SagaWatchdog in order-service: @Scheduled every 60 s, ShedLock 'saga-watchdog'",
+      "DeadLetterMonitor in each service: Kafka listener on .*-dlt in its own consumer group",
+      "Kafka listeners: order-service SagaReplyListener, inventory-service InventoryCommandListener, payment-service PaymentCommandListener (concurrency 4)"
+    ],
+    "runtime": "k8s Deployments with 3 replicas each, liveness and readiness on actuator probe groups, terminationGracePeriodSeconds 45, server.shutdown graceful; config from ConfigMap and Secret; no resource requests or limits, PDB or startupProbe; tracing at 10% sampling via OTLP; Prometheus scrape; gateway or ingress not in the repo.",
+    "lenses_run": [
+      "scalability",
+      "persistence",
+      "operability",
+      "data-consistency",
+      "resilience",
+      "service-boundaries",
+      "messaging"
+    ]
+  },
+  "findings": [
+    {
+      "id": "DC-001",
+      "lens": "data-consistency",
+      "title": "Every PSP 4xx (including 401/403/408/409/429) is recorded as a final decline, so throttling, a bad API key or an in-flight retry cancels orders silently, and a capture can land on a cancelled order",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "payment-service/src/main/java/com/example/platform/payment/messaging/PaymentCommandListener.java", "line": 41 },
+        { "file": "payment-service/src/main/java/com/example/platform/payment/psp/PspClient.java", "line": 46 },
+        { "file": "payment-service/src/main/resources/application.yml", "line": 76 },
+        { "file": "payment-service/src/main/resources/application.yml", "line": 86 },
+        { "file": "order-service/src/main/java/com/example/platform/order/saga/OrderSaga.java", "line": 82 }
+      ],
+      "evidence": "PaymentCommandListener.java:41-44: `} catch (HttpClientErrorException rejected) { // A 4xx is the PSP's final answer (card declined, invalid request): fail the payment, don't retry. response = new PspClient.CaptureResponse(null, \"rejected_\" + rejected.getStatusCode().value()); }` then PaymentRecorder saves `Payment.Status.DECLINED` and publishes `PaymentFailed`. application.yml: both `circuitbreaker.instances.psp.ignore-exceptions` and `retry.instances.psp.ignore-exceptions` list `org.springframework.web.client.HttpClientErrorException`. PspClient retries with the same `Idempotency-Key` (`\"capture-\" + command.orderId()`) after a 3s read timeout.",
+      "failure_scenario": "(a) The PSP API key in payment-service-secrets expires or is rotated out of order (401/403), or the PSP rate-limits as traffic triples (429). Every ChargePayment gets a 4xx; Resilience4j neither retries it nor counts it, so the breaker stays closed. The listener records DECLINED and emits PaymentFailed; order-service cancels the order and releases the stock. Nothing throws, so nothing reaches `<topic>-dlt` and the README's only page never fires: every order in the window is silently cancelled, and the unique `payments.order_id` row blocks a later redrive. (b) A capture exceeds the 3s read timeout while the PSP is still processing it; the Resilience4j retry with the same key gets 409 (in-flight idempotency key, Stripe-style). It is recorded as declined and the order is cancelled, then the original capture completes at the PSP: the customer is charged for a cancelled order, and no message or record ever says so.",
+      "recommendation": "Classify PSP 4xx responses in PspClient instead of treating the exception type as the business outcome. Map only definitive declines (402, or the PSP's decline codes) to PaymentFailed. Throw a transient exception for 408/409/425/429 so the Resilience4j retry and the Kafka backoff retry them (honouring Retry-After) and the circuit breaker counts them. Throw a non-retryable configuration exception for 401/403 so the command dead-letters and pages. Narrow both `ignore-exceptions` lists to the decline class. As a backstop for unknown outcomes, query the PSP by idempotency key before recording a decline, and alert (or issue a refund command) when the PSP reports a capture for an order that is CANCELLED.",
+      "pattern": "compensating-action",
+      "applies_when": "payment-service drives the saga's compensation path from the PSP's HTTP status, retries captures with the same idempotency key under a 3s read timeout, and the README relies on the DLT page as the failure signal; money is involved on every order.",
+      "effort": "small",
+      "also_reported_by": ["resilience"]
+    },
+    {
+      "id": "DC-002",
+      "lens": "data-consistency",
+      "title": "No payment-attempt row is written before the PSP call, so a `ChargePayment` redriven from the DLT after the PSP's idempotency window can capture twice",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "payment-service/src/main/java/com/example/platform/payment/messaging/PaymentCommandListener.java", "line": 40 },
+        { "file": "payment-service/src/main/java/com/example/platform/payment/messaging/PaymentRecorder.java", "line": 30 },
+        { "file": "payment-service/src/main/java/com/example/platform/payment/messaging/DeadLetterMonitor.java", "line": 17 }
+      ],
+      "evidence": "PaymentCommandListener.java:40: `response = psp.capture(\"capture-\" + command.orderId(), command.customerId(), command.amount());` runs before anything is persisted. The only local guard is in PaymentRecorder.java:30, after the PSP call: `if (!inbox.firstDelivery(messageId) || payments.findByOrderId(command.orderId()).isPresent()) {`. DeadLetterMonitor.java:17: `Records stay on the DLT; ops replays them with the dlt-redrive runbook once the cause is fixed.`",
+      "failure_scenario": "1. The PSP approves the capture. 2. The payments database is unavailable through the ~3 minutes of container retries, so `record` never commits and the command is dead-lettered with no payment row; the order stays STOCK_RESERVED. 3. Ops redrives the DLT after the PSP's idempotency-key retention has passed (often 24 hours). 4. The PSP treats the reused key as new and captures again. 5. `findByOrderId` finds nothing, so the second capture is recorded. The customer is charged twice. Two independent failures must coincide (a DB outage in that window and a late redrive), so it is graded medium.",
+      "recommendation": "Commit a PENDING payment-attempt row (orderId, idempotency key) in its own transaction before calling the PSP. On redelivery or redrive, if a PENDING attempt exists, look the capture up at the PSP by key or reference instead of capturing again, then complete the row. Add the PSP's key-retention window to the dlt-redrive runbook.",
+      "pattern": "idempotency-key",
+      "applies_when": "Dead-lettered ChargePayment commands are redriven by hand, possibly long after the PSP's idempotency window, and the payment is real money.",
+      "effort": "medium"
+    },
+    {
+      "id": "SB-001",
+      "lens": "service-boundaries",
+      "title": "An external pricing back office writes `price_list` directly in order-service's `orders` database",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/domain/PriceList.java", "line": 11 },
+        { "file": "order-service/src/main/resources/db/migration/V4__price_list.sql", "line": 1 }
+      ],
+      "evidence": "PriceList.java:11: `Current selling prices. The pricing back office writes {@code price_list}; order-service only reads it.` The table is created by order-service's own Flyway migration V4__price_list.sql: `create table price_list ( sku varchar(64) primary key, unit_price numeric(12, 2) not null check (unit_price > 0), active boolean ..., updated_at ...)`. The back office is not in this repo. README: \"Three Spring Boot services, each owning its own database\".",
+      "failure_scenario": "A system owned and deployed outside order-service holds write credentials to the checkout database and depends on a table whose schema order-service's Flyway controls. When order-service reshapes `price_list` (adding currency or validity ranges, say), back-office writes start failing at runtime, so prices go stale, or they write rows order-service misreads, so orders are priced wrongly. A back-office bulk update or bug also runs directly against the checkout database, and nobody owns pricing invariants beyond `unit_price > 0`.",
+      "recommendation": "Make the seam explicit. Either have pricing publish PriceChanged events and let order-service maintain `price_list` as its own read model, or expose a narrow price-write API owned by order-service. At minimum, give the back office a database role limited to `price_list` and treat the table's schema as a versioned contract that changes expand-then-contract.",
+      "pattern": "data-replication-via-events",
+      "applies_when": "The pricing back office is a separately owned system, as the comment implies, while the README promises one database per service and teams ship independently.",
+      "effort": "medium"
+    },
+    {
+      "id": "SC-001",
+      "lens": "scalability",
+      "title": "`OutboxRelay` publishes one record at a time with a blocking `send().get()` and a per-row merge, capping each service at roughly 50-100 messages/s",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/outbox/OutboxRelay.java", "line": 40 },
+        { "file": "inventory-service/src/main/java/com/example/platform/inventory/outbox/OutboxRelay.java", "line": 40 },
+        { "file": "payment-service/src/main/java/com/example/platform/payment/outbox/OutboxRelay.java", "line": 40 },
+        { "file": "order-service/src/main/resources/application.yml", "line": 63 }
+      ],
+      "evidence": "OutboxRelay.java:33-43: `@Scheduled(fixedDelayString = \"${outbox.relay-interval-ms}\") @SchedulerLock(name = \"outbox-relay\", lockAtMostFor = \"PT30S\") public void relay() throws Exception { for (OutboxEvent event : events.findUnsent(PageRequest.of(0, batchSize))) { ... kafka.send(record).get(10, TimeUnit.SECONDS); event.markSent(); events.save(event); } }` with `relay-interval-ms: 500` and `batch-size: 100`. `relay()` is not transactional, so each `save()` merges a detached entity in its own transaction. ShedLock makes one replica the only publisher.",
+      "failure_scenario": "Each row costs an acks=all round trip to a 3-replica broker plus a SELECT, UPDATE and commit, roughly 5-15 ms. A batch of 100 takes 0.5-1.5 s, then the relay sleeps 500 ms, so one service drains about 50-100 rows/s no matter how many replicas run. order-service needs about 45 rows/s at next year's stated 15 orders/s, leaving under 2x headroom. A promotion peak or growth past that backs the outbox up; every saga hop waits seconds to minutes, orders sit in PENDING, and past 15 minutes the watchdog cancels orders that were only queued. Adding replicas does not help because the lock serializes the work.",
+      "recommendation": "Send the whole batch asynchronously and wait once: collect the `kafka.send()` futures, then `CompletableFuture.allOf(...).get(...)`, and mark the batch sent with one statement (`update outbox set sent_at = now() where id in (:ids)`). Keep the batch time well inside `lockAtMostFor`. If more is ever needed, shard the relay by `hash(aggregate_key) % n` with one lock per shard, which preserves per-order ordering.",
+      "pattern": "bulk-operations",
+      "applies_when": "Stated growth to ~15 orders/s, with one serialized relay per service on the critical path of every saga step.",
+      "effort": "small"
+    },
+    {
+      "id": "PS-001",
+      "lens": "persistence",
+      "title": "Eagerly filled Hikari pools of 10 across 3 services x 3 replicas hold 90 connections against Postgres's default `max_connections` of 100",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "order-service/src/main/resources/application.yml", "line": 9 },
+        { "file": "inventory-service/src/main/resources/application.yml", "line": 9 },
+        { "file": "payment-service/src/main/resources/application.yml", "line": 9 },
+        { "file": "docker-compose.yml", "line": 3 }
+      ],
+      "evidence": "`hikari: maximum-pool-size: 10` in all three services with no `minimum-idle` (HikariCP defaults minimumIdle to maximumPoolSize, so each pod opens 10 connections at startup). k8s manifests: `replicas: 3` with the default RollingUpdate surge. docker-compose runs one `image: postgres:16` server for all three databases with no `max_connections` override. README: load \"expected to triple next year\".",
+      "failure_scenario": "Steady state holds 90 connections; Postgres 16 allows 100 minus 3 reserved for superusers. Any rolling deploy surges one pod (+10), and two services deploying together reach 110. Scaling to 4 replicas each for the tripled load needs 120. The newest pods cannot open connections, Flyway fails at startup or request threads wait out Hikari's 30 s connection-timeout, and POST /orders and saga consumers fail during the deploy or scale-out, pushing records toward the DLT. This holds only if production also runs the three databases on one server with default settings; a larger `max_connections` or PgBouncer would prevent it.",
+      "recommendation": "Budget connections per Postgres server: (replicas + surge) x pool size must fit under `max_connections` with headroom. Set `minimum-idle` to 2-4, keep pools small (these transactions are short), write the budget next to the k8s manifests, and add PgBouncer in transaction mode if replica counts grow.",
+      "pattern": "connection-pool-sizing",
+      "applies_when": "Several services may share one Postgres server, with replica counts expected to grow with the stated tripling of load.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-001",
+      "lens": "operability",
+      "title": "Each saga hop starts a new trace: Kafka observation is off and the outbox neither stores nor forwards trace context",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        { "file": "order-service/src/main/resources/application.yml", "line": 16 },
+        { "file": "order-service/src/main/java/com/example/platform/order/outbox/OutboxRelay.java", "line": 38 },
+        { "file": "order-service/src/main/resources/db/migration/V1__outbox_inbox_shedlock.sql", "line": 1 }
+      ],
+      "evidence": "No application.yml sets `spring.kafka.template.observation-enabled` or `spring.kafka.listener.observation-enabled` (both default to false in Spring Boot 3.3; framework default, from memory). The relay copies only two headers: `record.headers().add(\"message-id\", ...); record.headers().add(\"message-type\", ...);`. The outbox table has no trace column: `id, topic, aggregate_key, type, payload, created_at, sent_at`. Sampling: `probability: 0.1`.",
+      "failure_scenario": "A customer reports an order stuck in PENDING or cancelled unexpectedly. The POST /orders trace ends at the outbox insert; the relay, the inventory consumer, the saga step, the payment consumer and the PSP call each start a disconnected trace (or none, with listener observation off), each sampled independently at 10%, so a complete picture of one order almost never exists. On-call has to query three databases and the DLTs by orderId by hand to find which hop stalled.",
+      "recommendation": "Add a `trace_parent` column to `outbox`, fill it from the current span in `Outbox.publish`, and have the relay send it as a `traceparent` header. Enable `spring.kafka.listener.observation-enabled` and `spring.kafka.template.observation-enabled` so consumers continue the trace and the sampling decision travels with it. Put `orderId` in the logging MDC in every listener and in the controller.",
+      "pattern": "distributed-tracing",
+      "applies_when": "Every order crosses three deployables and four broker hops, and the outbox breaks the thread-local trace context by design.",
+      "effort": "medium"
+    },
+    {
+      "id": "OP-002",
+      "lens": "operability",
+      "title": "Nothing measures outbox backlog or age, or counts watchdog cancellations, so a stalled relay cancels orders without paging anyone",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/outbox/OutboxRelay.java", "line": 33 },
+        { "file": "inventory-service/src/main/java/com/example/platform/inventory/outbox/OutboxRelay.java", "line": 33 },
+        { "file": "order-service/src/main/java/com/example/platform/order/saga/SagaWatchdog.java", "line": 35 }
+      ],
+      "evidence": "The only custom meters in the repo are `Counter.builder(\"kafka.dlt.records\")` in each DeadLetterMonitor and `Gauge.builder(\"orders.saga.stuck_awaiting_payment\", ...)`, which counts only `Order.Status.STOCK_RESERVED`. `relay()` throws on a failed send; the scheduler logs it and retries on the next tick, with the same oldest row first (`order by e.createdAt`). `saga.timeOut(...)` cancels orders without any counter. README names only the DLT page.",
+      "failure_scenario": "The order-service or inventory-service relay stops publishing (a Kafka ACL or certificate change, broker throttling, or one row that always fails to send and blocks the head of the queue). Rows pile up in `outbox`. Nothing is consumed, so consumer lag stays zero and nothing reaches a DLT. Every new order stays PENDING and after 15 minutes the watchdog cancels it with \"timed out waiting for stock reservation\". The core flow is down and the only signals are log lines and customer complaints.",
+      "recommendation": "Register a gauge per service for unsent outbox rows and the age of the oldest unsent row (the partial index `outbox_unsent_idx` makes both cheap), and a counter for watchdog timeouts. Alert when the oldest unsent row is older than about a minute, when timeouts exceed a small rate, and on consumer lag. Keep the alert rules in the repo next to the README's DLT page.",
+      "pattern": "metrics-and-alerts",
+      "applies_when": "Every saga step depends on three scheduler-driven relays whose failure modes produce neither consumer lag nor DLT records.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-003",
+      "lens": "operability",
+      "title": "The k8s Deployments have no resource requests or limits, no PodDisruptionBudget, no topology spread and no startupProbe, although Flyway runs at boot",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "k8s/order-service.yaml", "line": 16 },
+        { "file": "k8s/inventory-service.yaml", "line": 16 },
+        { "file": "k8s/payment-service.yaml", "line": 16 },
+        { "file": "k8s/order-service.yaml", "section": "missing PodDisruptionBudget, resources, topologySpreadConstraints, startupProbe" }
+      ],
+      "evidence": "Each container spec has only `image`, `ports`, `envFrom`, `livenessProbe` and `readinessProbe`; there is no `resources:` block, and no PDB, affinity or spread constraint exists under `k8s/`. `livenessProbe` uses defaults (no initial delay, period 10 s, failureThreshold 3). Dockerfile: `ENTRYPOINT [\"java\", \"-jar\", \"/app.jar\"]` with no JVM memory flags.",
+      "failure_scenario": "1) A node drain during a cluster upgrade evicts two or three order-service pods at once because nothing limits disruption, and POST /orders is down until replacements start. 2) With no memory limit the JVM sizes its heap from node RAM, pods overpack nodes and get OOM-evicted together. 3) On a CPU-starved node or during a slow migration, startup takes longer than about 30 s; liveness kills the container before Tomcat listens and the rollout crash-loops. A cluster LimitRange or default spread constraints (not in the repo) would soften 1 and 2.",
+      "recommendation": "Set CPU and memory requests and limits and size the heap with `-XX:MaxRAMPercentage`. Add a PDB with `minAvailable: 2` per service, `topologySpreadConstraints` on hostname and zone, and a `startupProbe` on `/actuator/health/liveness` with a failureThreshold that covers migrations.",
+      "pattern": "resource-requests-and-disruption-budget",
+      "applies_when": "Three replicas per service on k8s, routine node drains, and Flyway migrations at startup.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-003",
+      "lens": "data-consistency",
+      "title": "Concurrent retries of `POST /orders` with the same `Idempotency-Key` return 500 instead of the original order",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/api/OrderService.java", "line": 39 },
+        { "file": "order-service/src/main/resources/db/migration/V2__orders.sql", "line": 3 }
+      ],
+      "evidence": "OrderService.java:39: `return orders.findByRequestKey(scopedKey).orElseGet(() -> { ... orders.save(order); saga.start(order); return order; });` with V2__orders.sql:3 `request_key varchar(200) not null unique`.",
+      "failure_scenario": "A client or gateway retries while the first request is still in flight. Both transactions miss the lookup and both insert; the second blocks on the unique index, then fails with DataIntegrityViolationException, and the client gets a 500 instead of the 202 with the original order. No duplicate order is created. A very long key (over ~135 characters after the customer prefix) also overflows the column and returns 500.",
+      "recommendation": "Catch DataIntegrityViolationException on `request_key`, re-read in a new transaction and return the existing order (or insert with `on conflict (request_key) do nothing`). Validate the Idempotency-Key length in the controller.",
+      "pattern": "idempotency-key",
+      "applies_when": "Clients or gateways retry POST on timeout, which is exactly what the Idempotency-Key header invites.",
+      "effort": "small"
+    },
+    {
+      "id": "MQ-001",
+      "lens": "messaging",
+      "title": "Permanent failures (unknown message type, missing header) are retried for ~3 minutes before `<topic>-dlt`, stalling the partition the whole time",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/InventoryCommandListener.java", "line": 32 },
+        { "file": "inventory-service/src/main/java/com/example/platform/inventory/config/KafkaConfig.java", "line": 28 },
+        { "file": "order-service/src/main/java/com/example/platform/order/messaging/Headers.java", "line": 24 }
+      ],
+      "evidence": "InventoryCommandListener.java:32: `default -> throw new IllegalArgumentException(\"Unknown command \" + Headers.messageType(record));` and Headers.java:24: `throw new IllegalArgumentException(\"Missing header \" + name + ...)`, but KafkaConfig.java:28 only registers `handler.addNotRetryableExceptions(com.fasterxml.jackson.core.JsonProcessingException.class);` alongside `new ExponentialBackOffWithMaxRetries(8)` with waits up to 60 s.",
+      "failure_scenario": "During a rolling deploy, order-service starts emitting a new command type before inventory-service understands it, or a record arrives without a message-id header. Each such record is retried 8 times over ~3 minutes before reaching the DLT, and every saga step behind it on that partition (1/12 of orders) waits the whole time.",
+      "recommendation": "Throw a dedicated exception (for example `UnknownMessageException`) for unknown types and missing headers and register it with `addNotRetryableExceptions` in all three KafkaConfig classes, so such records go straight to the DLT for redrive.",
+      "pattern": "dead-letter-queue",
+      "applies_when": "Producers and consumers are owned by different teams and deploy independently, so they can briefly disagree on message types.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-001",
+      "lens": "resilience",
+      "title": "Retries stack on the PSP: the Resilience4j `psp` retry (3 attempts) runs inside the Kafka error handler (9 deliveries), up to 27 capture calls per command",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "payment-service/src/main/java/com/example/platform/payment/psp/PspClient.java", "line": 46 },
+        { "file": "payment-service/src/main/java/com/example/platform/payment/config/KafkaConfig.java", "line": 20 },
+        { "file": "payment-service/src/main/resources/application.yml", "line": 81 }
+      ],
+      "evidence": "PspClient.java:45-47: `@CircuitBreaker(name = \"psp\") @Retry(name = \"psp\") public CaptureResponse capture(...)`; application.yml:81 `max-attempts: 3`; KafkaConfig.java:20 `new ExponentialBackOffWithMaxRetries(8)`.",
+      "failure_scenario": "The PSP is degraded with intermittent 5xx or timeouts below the 50% breaker threshold. Each failing ChargePayment makes 3 calls per delivery over 9 deliveries: up to 27 captures, each waiting up to 3 s, over about 3 minutes. The shared idempotency key prevents double charges and 12 consumer threads cap concurrency, so the cost is extra load on a struggling PSP and a partition held longer per failing record.",
+      "recommendation": "Keep one retry layer: drop the Resilience4j retry and rely on the Kafka backoff, or keep a single fast in-call retry and count it in the documented budget next to the \"~3 minutes\" comment. Revisit this together with DC-001, which makes 408/409/429 retryable.",
+      "pattern": "retry-with-backoff",
+      "applies_when": "The PSP call already sits behind a Kafka error handler with its own exponential backoff.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-002",
+      "lens": "resilience",
+      "title": "order-service's JWT decoder fetches OIDC discovery and JWKS from `AUTH_ISSUER_URI` with no configured timeouts",
+      "severity": "low",
+      "confidence": "medium",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/config/SecurityConfig.java", "line": 22 },
+        { "file": "order-service/src/main/resources/application.yml", "line": 41 }
+      ],
+      "evidence": "SecurityConfig.java:22: `.oauth2ResourceServer(oauth -> oauth.jwt(Customizer.withDefaults()))` with application.yml:41 `issuer-uri: ${AUTH_ISSUER_URI}` and no custom `JwtDecoder` or `RestOperations`. Framework default, from memory and not checked in source: Spring Security 6.3 builds the issuer-based decoder with a plain `RestTemplate` that has no connect or read timeout.",
+      "failure_scenario": "The identity provider hangs instead of refusing connections while an order-service pod starts or after a signing-key rotation forces a JWKS refetch. Request threads validating tokens block on the unbounded fetch, Tomcat threads fill and the pod stops serving POST and GET /orders until the IdP answers or the OS TCP timeout fires. Keys are otherwise cached, so the trigger is rare.",
+      "recommendation": "Define a `JwtDecoder` bean with `NimbusJwtDecoder.withIssuerLocation(...).restOperations(...)` using a RestTemplate with ~1 s connect and ~2 s read timeouts, and a JWK cache so the last good keys keep working during an IdP outage.",
+      "pattern": "timeouts",
+      "applies_when": "order-service validates a JWT on every request against a remote issuer.",
+      "effort": "small"
+    },
+    {
+      "id": "SC-002",
+      "lens": "scalability",
+      "title": "`SagaWatchdog` times out at most 100 PENDING orders per minute, below the 300 orders/minute peak, so the 15-minute cancellation slips after an outage",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/saga/SagaWatchdog.java", "line": 44 }
+      ],
+      "evidence": "SagaWatchdog.java:40-46: `@Scheduled(fixedDelay = 60_000) @SchedulerLock(name = \"saga-watchdog\") ... orders.findByStatusAndCreatedAtBefore(Order.Status.PENDING, cutoff, PageRequest.of(0, 100))` handles one page per run. README: \"Orders with no reply after 15 minutes are cancelled by the saga watchdog\" and \"peak ~300 orders/minute, expected to triple next year\".",
+      "failure_scenario": "inventory-service is down for 30 minutes at peak, leaving ~9,000 orders PENDING. Most will complete normally once inventory catches up on its Kafka backlog, but orders whose reply was dead-lettered wait up to ~90 minutes (4.5 hours at next year's rate) to be cancelled instead of 15, with any stock reserved for them held all that time and customers seeing PENDING.",
+      "recommendation": "Loop over pages until a page comes back short or a time budget well inside the lock (for example 45 s against a 1-minute `lockAtMostFor`) runs out, keeping one transaction per order as now, and export the PENDING-past-cutoff count as a gauge.",
+      "pattern": "work-queue",
+      "applies_when": "Stated peak intake (300/min, rising to 900/min) already exceeds the watchdog's fixed 100/min drain rate.",
+      "effort": "small"
+    },
+    {
+      "id": "SC-003",
+      "lens": "scalability",
+      "title": "`StockService.reserve` locks `stock_items` rows in the order the client sent the lines, so concurrent reservations of overlapping SKUs can deadlock",
+      "severity": "low",
+      "confidence": "medium",
+      "locations": [
+        { "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/StockService.java", "line": 33 }
+      ],
+      "evidence": "StockService.java:33-34: `for (Messages.Line line : command.lines()) { if (stock.tryReserve(line.sku(), line.quantity()) == 0) {` with StockRepository `update StockItem s set s.available = s.available - :qty ... where s.sku = :sku and s.available >= :qty`; the row locks are held until the listener transaction commits. OrderService rejects duplicate SKUs but does not sort lines.",
+      "failure_scenario": "Two inventory consumers on different partitions process order 1 with lines [A, B] and order 2 with lines [B, A]. Each locks its first SKU and waits for the other; Postgres aborts one after `deadlock_timeout` (1 s) and the error handler retries it. On popular SKUs this adds latency and error noise, and repeated deadlocks push records toward the DLT.",
+      "recommendation": "Sort the lines by SKU before reserving, in `StockService.reserve` or when `ReserveStock` is built in `OrderSaga.start`, so every transaction takes row locks in the same order.",
+      "pattern": "consistent-lock-ordering",
+      "applies_when": "Several inventory consumer threads across 3 pods reserve multi-line orders that share popular SKUs.",
+      "effort": "small"
+    },
+    {
+      "id": "PS-002",
+      "lens": "persistence",
+      "title": "The nightly outbox purge deletes a day's sent rows in one unbounded `DELETE`, unlike the chunked inbox purge",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/outbox/OutboxRepository.java", "line": 20 },
+        { "file": "inventory-service/src/main/java/com/example/platform/inventory/outbox/OutboxRepository.java", "line": 20 },
+        { "file": "payment-service/src/main/java/com/example/platform/payment/outbox/OutboxRepository.java", "line": 20 }
+      ],
+      "evidence": "OutboxRepository.java:18-21: `@Modifying @Transactional @Query(\"delete from OutboxEvent e where e.sentAt < :cutoff\")`, called once by `purgeSent()`. Compare Inbox.purgeOld: `delete from processed_messages where message_id in (select message_id ... limit 5000)` in a loop, documented \"Deleted in chunks to keep locks short\".",
+      "failure_scenario": "At the tripled load order-service writes a few hundred thousand outbox rows a day, and one transaction deletes them all each night: a burst of WAL and replication lag, one long transaction that holds back vacuum, and index bloat on the table the relay polls every 500 ms.",
+      "recommendation": "Purge in bounded chunks like Inbox.purgeOld, e.g. `delete from outbox where id in (select id from outbox where sent_at < ? limit 5000)` in a loop, one transaction per chunk.",
+      "pattern": "data-retention",
+      "applies_when": "The outbox gets a row for every saga step and order volume is expected to triple.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-004",
+      "lens": "operability",
+      "title": "order-service pods have no preStop delay, so endpoint removal races SIGTERM and some POST /orders fail on every rollout",
+      "severity": "low",
+      "confidence": "medium",
+      "locations": [
+        { "file": "k8s/order-service.yaml", "line": 15 }
+      ],
+      "evidence": "k8s/order-service.yaml:15 `terminationGracePeriodSeconds: 45` and `server.shutdown: graceful` are set, but the container has no `lifecycle.preStop`.",
+      "failure_scenario": "On each rolling deploy or scale-in, Tomcat stops accepting connections as soon as SIGTERM arrives while kube-proxy and the ingress still route to the pod for a few seconds; those requests get connection refused or 503. Clients that retry with the same Idempotency-Key recover; others see errors on every deploy.",
+      "recommendation": "Add `lifecycle: preStop: exec: command: [\"sh\", \"-c\", \"sleep 10\"]` to order-service and keep the total shutdown under `terminationGracePeriodSeconds`.",
+      "pattern": "graceful-shutdown",
+      "applies_when": "order-service serves external HTTP behind a k8s Service with rolling deploys.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-005",
+      "lens": "operability",
+      "title": "Every service's `DeadLetterMonitor` reads all `.*-dlt` topics in its own group, so each DLT record is counted, logged and paged three times",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/messaging/DeadLetterMonitor.java", "line": 30 },
+        { "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/DeadLetterMonitor.java", "line": 30 },
+        { "file": "payment-service/src/main/java/com/example/platform/payment/messaging/DeadLetterMonitor.java", "line": 30 }
+      ],
+      "evidence": "`@KafkaListener(topicPattern = \".*-dlt\", groupId = \"order-service-dlt-monitor\")`, and the same pattern with `inventory-service-dlt-monitor` and `payment-service-dlt-monitor`; all consumers use `auto-offset-reset: earliest`.",
+      "failure_scenario": "One `payment-commands-dlt` record increments `kafka_dlt_records_total` in all three services, so an alert routed by application pages the Checkout, Warehouse and Payments teams together and a `sum()` reports three times the real count. A renamed monitor group reads every DLT from the beginning and fires a burst of false pages.",
+      "recommendation": "Have each service monitor only the DLTs of topics it consumes (order-service: inventory-events-dlt and payment-events-dlt; inventory-service: inventory-commands-dlt; payment-service: payment-commands-dlt), and set `auto-offset-reset: latest` for the monitor groups.",
+      "pattern": "metrics-and-alerts",
+      "applies_when": "The README says DLT records page on-call and the three services belong to separate teams.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-006",
+      "lens": "operability",
+      "title": "order-service serves `/actuator/prometheus` unauthenticated on the same port as the public API",
+      "severity": "low",
+      "confidence": "medium",
+      "locations": [
+        { "file": "order-service/src/main/java/com/example/platform/order/config/SecurityConfig.java", "line": 20 }
+      ],
+      "evidence": "SecurityConfig.java:20: `.requestMatchers(\"/actuator/health/**\", \"/actuator/prometheus\").permitAll()`, with no `management.server.port`, so actuator shares port 8080 with `/orders`.",
+      "failure_scenario": "If the ingress (not in the repo) forwards every path to order-service, anyone on the internet can scrape order volumes, error rates, topic names and JVM details.",
+      "recommendation": "Move actuator to a separate `management.server.port` reachable only inside the cluster, or block `/actuator/**` at the ingress.",
+      "pattern": "api-gateway",
+      "applies_when": "order-service is the internet-facing entry point.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-007",
+      "lens": "operability",
+      "title": "docker-compose cannot start the stack as committed: required env vars are missing and topics demand replication factor 3 on one broker",
+      "severity": "low",
+      "confidence": "medium",
+      "locations": [
+        { "file": "docker-compose.yml", "line": 19 }
+      ],
+      "evidence": "The compose services set only `SPRING_DATASOURCE_URL`, `SPRING_KAFKA_BOOTSTRAP_SERVERS` and (payment) `PSP_BASE_URL`, while the application.yml files require `${DB_USER}`, `${DB_PASSWORD}`, `${AUTH_ISSUER_URI}` and `${PSP_API_KEY}` with no defaults. Kafka runs as a single KRaft node while every TopicsConfig declares `.replicas(3)`.",
+      "failure_scenario": "`docker compose up` fails at startup on unresolved placeholders, and topic creation with replication factor 3 fails on one broker, so local and CI runs never exercise the production topic configuration.",
+      "recommendation": "Add a compose `.env` or local defaults for the four variables and make the topic replication factor a property (1 locally, 3 in production).",
+      "pattern": "externalized-config",
+      "applies_when": "Developers or CI use docker-compose to run the platform.",
+      "effort": "small"
+    }
+  ],
+  "strengths": [
+    "Transactional outbox in all three services: `Outbox.publish` is `Propagation.MANDATORY`, so every event is written in the same transaction as the state change, and a ShedLock-guarded relay publishes it.",
+    "Idempotent consumers: the inbox insert (`on conflict do nothing`) runs in the same transaction as the handler's effects, with `rollbackFor = Exception.class`.",
+    "Orchestrated saga with an explicit state machine: `Order.status` is the saga state, transitions are guarded (`transition(from, to)`), redelivered replies are no-ops, and `ReleaseStock` compensates both failed payments and watchdog timeouts.",
+    "Late replies are handled: a StockReserved arriving for a CANCELLED order releases the stock, and the watchdog deliberately never cancels STOCK_RESERVED orders so a late capture cannot land on a cancelled order through that path.",
+    "The PSP call runs outside any DB transaction, with 1 s connect and 3 s read timeouts, a circuit breaker, and a stable idempotency key per order.",
+    "Every scheduled job (relays, purges, watchdog) uses ShedLock with database time, so 3 replicas do not duplicate work.",
+    "Kafka consumers use manual record acks with auto-commit off, a DLT per topic on the same partition, and non-retryable handling for JSON errors; producers use acks=all with idempotence.",
+    "All messages are keyed by orderId, so each order's commands and replies stay ordered within a partition.",
+    "Stock is reserved with an atomic conditional UPDATE backed by a `check (available >= 0)` constraint; Order has `@Version` for optimistic locking.",
+    "POST /orders is idempotent per customer on Idempotency-Key, takes the customer from the JWT subject, prices from the server-side price list, and validates line counts and quantities.",
+    "POST /orders returns 202 and clients poll, so no request thread waits on the saga.",
+    "Database per service, per-service message records (no shared domain library) with add-only evolution, and no synchronous calls between services.",
+    "Persistence hygiene: Open Session in View off, Flyway with `ddl-auto: validate`, indexes for every query path including a partial unsent-outbox index, paged reads capped at 50, and retention on outbox and inbox tables.",
+    "Operational basics: actuator liveness and readiness probes, graceful shutdown with a matching grace period, secrets from k8s Secrets, OTel tracing and Prometheus metrics, and a DLT counter wired to paging."
+  ],
+  "dropped": []
+}

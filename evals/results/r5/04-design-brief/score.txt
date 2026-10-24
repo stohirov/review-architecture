@@ -1,0 +1,19 @@
+04-design-brief: PASS
+  findings: 27
+  recall: 6/6 (100%)
+    + shared-database <- SB-001, SB-002
+    + sync-payment-in-booking <- DC-001, DC-003, DC-005, RS-001, RS-002, RS-003, RS-004
+    + remote-calls-in-tx <- DC-001, DC-002, DC-004, DC-006, DC-007
+    + location-write-hotspot <- SC-002, SC-004, PS-001, PS-003
+    + matching-in-memory-state <- RS-002, RS-003, SC-001, SC-002
+    + trip-completed-dual-write <- DC-001, DC-002, DC-003, DC-004, DC-005, DC-007, MQ-001
+  bonus: notification-on-critical-path, no-saga-booking, payment-consumer-idempotency
+  not in answer key (review by hand):
+    ? MQ-002 [medium] The `TripCompleted` contract is undefined across consumers deployed by different squads
+    ? SC-003 [medium] The `TripCompleted` capture consumer blocks on Stripe, and no partition count or consumer concurrency is planned
+    ? PS-002 [medium] No connection budget for eight services on one Postgres primary, and no pooler
+    ? PS-004 [low] No retention or archival policy for per-ride and per-event tables
+    ? OP-001 [medium] No tracing or correlation id planned across the multi-service booking and completion flows
+    ? OP-002 [medium] No SLO metrics or alerts for the 99.95% ride-request target, consumer lag, DLTs or replica lag
+    ? OP-003 [medium] No graceful-shutdown plan for the long synchronous booking request during rolling deploys
+    ? OP-004 [low] No health-probe design yet. A DB-checking liveness probe on eight services sharing one Postgres would restart them all together

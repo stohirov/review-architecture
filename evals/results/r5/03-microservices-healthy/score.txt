@@ -1,0 +1,25 @@
+03-microservices-healthy: FAIL
+  findings: 19
+  recall: 0/0 (100%)
+  control: above max severity: DC-001
+  control warning (check by hand): names an implemented pattern: DC-001, DC-002, OP-001, DC-003, MQ-001, RS-002, OP-004
+  not in answer key (review by hand):
+    ? DC-001 [high] Every PSP 4xx (including 401/403/408/409/429) is recorded as a final decline, so throttling, a bad API key or an in-flight retry cancels orders silently, and a capture can land on a cancelled order
+    ? DC-002 [medium] No payment-attempt row is written before the PSP call, so a `ChargePayment` redriven from the DLT after the PSP's idempotency window can capture twice
+    ? SB-001 [medium] An external pricing back office writes `price_list` directly in order-service's `orders` database
+    ? SC-001 [medium] `OutboxRelay` publishes one record at a time with a blocking `send().get()` and a per-row merge, capping each service at roughly 50-100 messages/s
+    ? PS-001 [medium] Eagerly filled Hikari pools of 10 across 3 services x 3 replicas hold 90 connections against Postgres's default `max_connections` of 100
+    ? OP-001 [medium] Each saga hop starts a new trace: Kafka observation is off and the outbox neither stores nor forwards trace context
+    ? OP-002 [medium] Nothing measures outbox backlog or age, or counts watchdog cancellations, so a stalled relay cancels orders without paging anyone
+    ? OP-003 [medium] The k8s Deployments have no resource requests or limits, no PodDisruptionBudget, no topology spread and no startupProbe, although Flyway runs at boot
+    ? DC-003 [low] Concurrent retries of `POST /orders` with the same `Idempotency-Key` return 500 instead of the original order
+    ? MQ-001 [low] Permanent failures (unknown message type, missing header) are retried for ~3 minutes before `<topic>-dlt`, stalling the partition the whole time
+    ? RS-001 [low] Retries stack on the PSP: the Resilience4j `psp` retry (3 attempts) runs inside the Kafka error handler (9 deliveries), up to 27 capture calls per command
+    ? RS-002 [low] order-service's JWT decoder fetches OIDC discovery and JWKS from `AUTH_ISSUER_URI` with no configured timeouts
+    ? SC-002 [low] `SagaWatchdog` times out at most 100 PENDING orders per minute, below the 300 orders/minute peak, so the 15-minute cancellation slips after an outage
+    ? SC-003 [low] `StockService.reserve` locks `stock_items` rows in the order the client sent the lines, so concurrent reservations of overlapping SKUs can deadlock
+    ? PS-002 [low] The nightly outbox purge deletes a day's sent rows in one unbounded `DELETE`, unlike the chunked inbox purge
+    ? OP-004 [low] order-service pods have no preStop delay, so endpoint removal races SIGTERM and some POST /orders fail on every rollout
+    ? OP-005 [low] Every service's `DeadLetterMonitor` reads all `.*-dlt` topics in its own group, so each DLT record is counted, logged and paged three times
+    ? OP-006 [low] order-service serves `/actuator/prometheus` unauthenticated on the same port as the public API
+    ? OP-007 [low] docker-compose cannot start the stack as committed: required env vars are missing and topics demand replication factor 3 on one broker
