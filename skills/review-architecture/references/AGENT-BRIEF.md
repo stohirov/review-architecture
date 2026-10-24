@@ -46,15 +46,19 @@ When a root cause fits more than one row, its owner is the lens whose fix closes
 
 Grade by the worst realistic outcome. Then lower it one level for each independent failure, beyond the first, that must coincide for the outcome to happen. If infrastructure the repo doesn't show might *prevent* the failure (a LimitRange, an ingress policy), cap the confidence at medium, keep the severity, and say what would have to exist. In design mode, grade against the brief and the profile's assumptions.
 
-- **critical**: loses or corrupts data, leaves money or stock inconsistent, or causes an outage under normal load. Also: blocks horizontal scaling outright when the project needs more than one instance.
-- **high**: wrong behaviour under ordinary failures (a retry, a crash between two steps, a slow dependency) or at the project's stated scale.
+Severity is **impact × trigger**. The damaging impacts are: data lost or corrupted, money or stock wrong, or the core flow down. The trigger decides between critical and high:
+
+- **critical**: a damaging impact on the normal path, or on a frequent routine event: every request, every deploy or scale-out, any timeout under ordinary load. Also: blocks horizontal scaling outright when the project needs more than one instance.
+  - Examples: every message fails to deserialize; a retried POST double-charges whenever the callee is slow; carts in instance memory behind a load balancer.
+- **high**: the same impacts behind a less frequent trigger: a crash in the narrow window between two steps, a broker redelivery after a rebalance, a dependency outage. Also: wrong behaviour at the project's stated scale.
+  - Examples: a crash between commit and publish loses the event; a redelivered message is applied twice; a hung dependency drains the pool.
 - **medium**: degrades performance or operability now, or breaks at roughly 10× today's load.
 - **low**: cheap hygiene with a real but small payoff.
 - **info**: an observation with no action needed.
 
 ### Confidence
 
-- **high**: you traced it end to end in code (or the brief states it outright). Framework default behaviour counts as traced when the build pins the version and you can name the default.
+- **high**: you traced it end to end in code (or the brief states it outright). Framework default behaviour counts as traced when the build pins the version and you can name the default. If you could not check that default in source, say so in `evidence` ("framework default, Spring Kafka 3.2, from memory").
 - **medium**: you saw the signal; part of the context is inferred.
 - **low**: suspicion. Critical or high findings with low confidence are dropped by the parent, so dig until you can raise the confidence or lower the severity.
 
