@@ -114,13 +114,63 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Every finding needs its own Markdown heading, e.g. "#### DC-001 · Title".
+const REQUIRED_SECTIONS = ["summary", "architecture profile", "findings", "roadmap", "what's already sound", "not reviewed"];
+
+function normalizeHeading(text) {
+  return text.trim().toLowerCase().replace(/[‘’]/g, "'");
+}
+
+// Splits the report into "## " sections and records which "### " severity group
+// each "#### <id>" finding heading sits under (REPORT.md defines the layout).
+function parseReport(markdown) {
+  const sections = new Map();
+  const findingHeadings = new Map();
+  let h2 = null;
+  let h3 = null;
+  let fence = null;
+  for (const line of markdown.split(/\r?\n/u)) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (marker && (fence === null || (marker[0] === fence[0] && marker.length >= fence.length))) {
+      fence = fence === null ? marker : null;
+    }
+    const m = fence === null && !marker ? /^(#{1,6})\s+(.*)$/u.exec(line) : null;
+    if (m) {
+      const level = m[1].length;
+      if (level <= 2) {
+        h2 = level === 2 ? normalizeHeading(m[2]) : null;
+        h3 = null;
+        if (h2 !== null) sections.set(h2, sections.get(h2) ?? []);
+      } else if (level === 3) {
+        h3 = normalizeHeading(m[2]);
+      } else if (level === 4) {
+        const id = /^([A-Z]{2,5}-[0-9]{3})\b/u.exec(m[2].trim())?.[1];
+        if (id && !findingHeadings.has(id)) findingHeadings.set(id, { h2, h3 });
+      }
+    }
+    if (h2 !== null) sections.get(h2).push(line);
+  }
+  return { sections, findingHeadings };
+}
+
 export function checkReport(doc, markdown) {
   if (!Array.isArray(doc?.findings)) return [];
-  return doc.findings
-    .filter((f) => typeof f?.id === "string")
-    .filter((f) => !new RegExp(`^#{2,6}\\s+${escapeRegExp(f.id)}\\b`, "mu").test(markdown))
-    .map((f) => `report: no heading for ${f.id}`);
+  const { sections, findingHeadings } = parseReport(markdown);
+  const errors = REQUIRED_SECTIONS.filter((s) => !sections.has(s)).map((s) => `report: missing section "## ${s}"`);
+  const roadmap = (sections.get("roadmap") ?? []).join("\n");
+  for (const f of doc.findings) {
+    if (typeof f?.id !== "string") continue;
+    const heading = findingHeadings.get(f.id);
+    if (!heading) {
+      errors.push(`report: no "#### ${f.id}" heading`);
+      continue;
+    }
+    if (heading.h2 !== "findings") errors.push(`report: ${f.id} is not under "## Findings"`);
+    else if (heading.h3 !== f.severity) errors.push(`report: ${f.id} is under "### ${heading.h3 ?? "(none)"}" but its severity is ${f.severity}`);
+    if (f.severity !== "info" && sections.has("roadmap") && !new RegExp(`\\b${escapeRegExp(f.id)}\\b`, "u").test(roadmap)) {
+      errors.push(`report: ${f.id} is missing from the Roadmap`);
+    }
+  }
+  return errors;
 }
 
 export function validate(doc, schema = loadSchema()) {
@@ -159,7 +209,7 @@ function main(argv) {
     console.error(`${file}: ${errors.length} error(s)`);
     return 1;
   }
-  console.log(`${file}: valid (${doc.findings.length} finding(s))${reportPath ? `; every finding has a heading in ${reportPath}` : ""}`);
+  console.log(`${file}: valid (${doc.findings.length} finding(s))${reportPath ? `; report layout ok in ${reportPath}` : ""}`);
   return 0;
 }
 

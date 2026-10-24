@@ -250,6 +250,21 @@
               "medium",
               "large"
             ]
+          },
+          "also_reported_by": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "scalability",
+                "data-consistency",
+                "resilience",
+                "service-boundaries",
+                "messaging",
+                "persistence",
+                "operability"
+              ]
+            },
+            "description": "Other lenses whose candidates were merged into this finding in step 5."
           }
         }
       }

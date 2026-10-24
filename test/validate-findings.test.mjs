@@ -125,20 +125,71 @@ test("profile requires stated intent and rejects unknown fields", () => {
   assert.ok(validate(doc({ profile: { ...doc().profile, mood: "ok" } })).some((e) => e.includes('unexpected property "mood"')));
 });
 
-test("checkReport requires a heading per finding", () => {
-  const d = doc({ findings: [finding(), finding({ id: "DC-002" })] });
-  assert.deepEqual(checkReport(d, "## Findings\n### High\n#### DC-001 · HTTP call\n#### DC-002 · Other\n"), []);
-  assert.deepEqual(checkReport(d, "#### DC-001 · HTTP call\nsee DC-002 below\n"), ["report: no heading for DC-002"]);
-  assert.deepEqual(checkReport(d, "#### DC-0012 · near miss\n#### DC-001 · ok\n"), ["report: no heading for DC-002"]);
+function report({ findings = "### High\n#### DC-001 · HTTP call\n", roadmap = "- DC-001: move the call\n", drop = [] } = {}) {
+  const sections = {
+    "Summary": "Short.\n",
+    "Architecture profile": "Profile.\n",
+    "Findings": findings,
+    "Roadmap": roadmap,
+    "What's already sound": "Outbox.\n",
+    "Not reviewed": "Security.\n",
+  };
+  return "# Architecture review: x\n" + Object.entries(sections)
+    .filter(([name]) => !drop.includes(name))
+    .map(([name, body]) => `## ${name}\n${body}`)
+    .join("");
+}
+
+test("checkReport accepts the documented layout", () => {
+  assert.deepEqual(checkReport(doc(), report()), []);
+  assert.deepEqual(checkReport(doc(), report().replace("What's", "What’s")), []);
 });
 
-test("CLI --report fails when a finding has no heading", () => {
+test("checkReport ignores headings inside code fences", () => {
+  const body = "### High\n#### DC-001 · a\n```yaml\n# application.yml\n## not a heading\n```\n~~~\n# x\n~~~\n";
+  assert.deepEqual(checkReport(doc(), report({ findings: body })), []);
+  const hidden = report({ findings: "### High\n```\n#### DC-001 · a\n```\n" });
+  assert.deepEqual(checkReport(doc(), hidden), ['report: no "#### DC-001" heading']);
+});
+
+test("checkReport requires every section", () => {
+  assert.deepEqual(checkReport(doc(), report({ drop: ["Roadmap", "Not reviewed"] })), [
+    'report: missing section "## roadmap"',
+    'report: missing section "## not reviewed"',
+  ]);
+});
+
+test("checkReport requires a #### heading per finding", () => {
+  const d = doc({ findings: [finding(), finding({ id: "DC-002" })] });
+  const errors = checkReport(d, report({ roadmap: "DC-001, DC-002\n", findings: "### High\n#### DC-001 · a\nsee DC-002 and DC-0021\n" }));
+  assert.deepEqual(errors, ['report: no "#### DC-002" heading']);
+});
+
+test("checkReport requires findings under their own severity", () => {
+  const errors = checkReport(doc(), report({ findings: "### Medium\n#### DC-001 · a\n" }));
+  assert.deepEqual(errors, ['report: DC-001 is under "### medium" but its severity is high']);
+  const outside = checkReport(doc(), report({ findings: "x\n" }) + "#### DC-001 · stray\n");
+  assert.deepEqual(outside, ['report: DC-001 is not under "## Findings"']);
+});
+
+test("checkReport requires non-info findings in the roadmap", () => {
+  assert.deepEqual(checkReport(doc(), report({ roadmap: "nothing\n" })), ["report: DC-001 is missing from the Roadmap"]);
+  const info = doc({ findings: [finding({ severity: "info", confidence: "low" })] });
+  assert.deepEqual(checkReport(info, report({ findings: "### Info\n#### DC-001 · a\n", roadmap: "nothing\n" })), []);
+});
+
+test("also_reported_by must name lenses", () => {
+  assert.deepEqual(validate(doc({ findings: [finding({ also_reported_by: ["data-consistency"] })] })), []);
+  assert.ok(validate(doc({ findings: [finding({ also_reported_by: ["security"] })] })).some((e) => e.includes('"security" is not one of')));
+});
+
+test("CLI --report fails when the layout is wrong", () => {
   const dir = mkdtempSync(join(tmpdir(), "ra-report-"));
   const json = join(dir, "f.json");
   const md = join(dir, "r.md");
   writeFileSync(json, JSON.stringify(doc()));
-  writeFileSync(md, "# Review\n");
+  writeFileSync(md, "# Review\n#### DC-001 · HTTP call\n");
   assert.throws(() => execFileSync("node", [SCRIPT, json, "--report", md], { stdio: "pipe" }), (err) => err.status === 1);
-  writeFileSync(md, "# Review\n#### DC-001 · HTTP call inside @Transactional\n");
-  assert.match(execFileSync("node", [SCRIPT, json, "--report", md], { encoding: "utf8" }), /every finding has a heading/);
+  writeFileSync(md, report());
+  assert.match(execFileSync("node", [SCRIPT, json, "--report", md], { encoding: "utf8" }), /report layout ok/);
 });

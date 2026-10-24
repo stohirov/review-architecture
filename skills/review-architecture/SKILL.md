@@ -70,8 +70,8 @@ Lens agents each see one lens and one slice of code. You see everything. For eve
 1. **Evidence**: open the cited location. The quoted evidence must be there: in code, at that line (correct the line number if it is off); in design mode, verbatim in the brief. Otherwise drop the candidate.
 2. **Mitigation**: search for a fix that lives elsewhere, such as a lock configured in another module, a global client timeout, an outbox relay, or a dedup table. If one exists, drop or downgrade the candidate.
 3. **Proportionality**: check `applies_when` against the profile. Drop recommendations the project's scale or shape does not justify.
-4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the ownership table in `references/AGENT-BRIEF.md`, and fold the other angle into it.
-5. **Severity**: re-grade against the scale in `references/AGENT-BRIEF.md`. A critical or high finding needs medium or high confidence after your own reading.
+4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the ownership table in `references/AGENT-BRIEF.md`, fold the other angle into it, and list the other lens in `also_reported_by`. One cause with two distinct failures that need different fixes stays as two findings.
+5. **Severity**: re-grade against the impact × trigger scale in `references/AGENT-BRIEF.md`. Critical is meant to be rare: re-check every critical against its trigger, and move narrow-window or rare-event findings to high. A critical or high finding needs medium or high confidence after your own reading.
 
 Assign ids by lens prefix and sequence: `SC` scalability, `DC` data-consistency, `RS` resilience, `SB` service-boundaries, `MQ` messaging, `PS` persistence, `OP` operability (for example `DC-001`).
 
@@ -87,7 +87,7 @@ Write two files:
 
 In codebase and hybrid mode they go in the project root; in design mode, the current directory. Use another location if the user names one.
 
-Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json --report <path>/architecture-review.md`, and fix both files until it exits 0. The `--report` check confirms that every finding has its heading in the Markdown.
+Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json --report <path>/architecture-review.md`, and fix both files until it exits 0. The `--report` check confirms the report's sections, that each finding has its heading under its own severity, and that every non-info finding is on the roadmap.
 
 Done when the validator passes with `--report`.
 

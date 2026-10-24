@@ -4,17 +4,19 @@
 
 ## Sections, in order
 
+The `##` headings are exactly: `## Summary`, `## Architecture profile`, `## Findings`, `## Roadmap`, `## What's already sound` and `## Not reviewed`. The validator's `--report` check requires them, and checks that each finding sits under its own severity heading and that every non-info finding appears in the Roadmap.
+
 1. **Title and scope**: `# Architecture review: <target>`, then the mode, the date, the lenses that ran (and why any were skipped), and any lens the parent had to run itself.
 2. **Summary**: 3–5 sentences: what the system is, its biggest risk, and the one change that buys the most. In hybrid mode, add one sentence on whether the system can meet its stated intent. Then a severity count table.
 3. **Architecture profile**: the profile from step 2, including the assumptions, plus one Mermaid diagram of the deployables, datastores and brokers as they *are* (or as the brief plans them). Mark every edge sync or async, and label risky edges with their finding ids (`A -- "sync · RS-001" --> B`). Highlight the nodes that findings touch with `classDef risk stroke:#d33,stroke-width:3px`. Quote any label that contains parentheses or braces.
 4. **Findings**: under `## Findings`, one `### Critical` / `### High` / `### Medium` / `### Low` / `### Info` heading per severity that has findings, in that order. Each finding gets:
-   - `#### <id> · <title>` (the validator's `--report` check looks for this heading), and a line with severity, confidence, lens and effort
+   - `#### <id> · <title>`, and a line with severity, confidence, lens, effort and `also_reported_by` (if any)
    - **Where**: locations as `path:line` (design mode: the brief section)
    - **Evidence**: the quoted code or brief text, in a fenced block
    - **What goes wrong**: the failure scenario
    - **Fix**: the recommendation and pattern, with a short code sketch when the fix is local
    - **Why it's worth it here**: `applies_when`
-   - For a fix that changes how data flows (outbox, saga, idempotent consumer), add a small Mermaid sequence diagram of the fixed flow.
+   - For a fix that changes how data flows (outbox, saga, idempotent consumer), add a small Mermaid sequence diagram of the fixed flow. Findings with the same fixed flow share one diagram; keep it to four diagrams or fewer per report.
 5. **Roadmap**: findings ordered into
    - **Now**: critical and high with small or medium effort, plus any finding (of any severity) their fixes depend on
    - **Next**: the remaining critical and high, then the medium findings
