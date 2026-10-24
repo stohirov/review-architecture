@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Scores an architecture-findings.json against a fixture answer key.
-// Usage: node evals/score.mjs <findings.json> <answer-key.json> [--min-recall 0.9]
+// Usage: node evals/score.mjs <findings.json> <answer-key.json> [--min-recall 0.9] [--report <review.md>] [--brief <brief.md>]
 // Exits 0 when the findings are valid, recall meets the bar and no control finding exceeds the
 // key's max severity. Control findings that name an already-implemented pattern are listed as
 // warnings: they are false positives unless they point at a concrete gap in that implementation.
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { validate } from "../skills/review-architecture/scripts/validate-findings.mjs";
+import { basename } from "node:path";
+import { validate, checkReport, checkBrief } from "../skills/review-architecture/scripts/validate-findings.mjs";
 
 const SEVERITY_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
 
@@ -33,8 +34,10 @@ export function matches(finding, expected) {
   return (expected.keywords ?? []).every((kw) => new RegExp(kw, "iu").test(text));
 }
 
-export function score(doc, key, { minRecall = 0.9 } = {}) {
+export function score(doc, key, { minRecall = 0.9, report, brief } = {}) {
   const validationErrors = validate(doc);
+  if (!validationErrors.length && report !== undefined) validationErrors.push(...checkReport(doc, report));
+  if (!validationErrors.length && brief !== undefined) validationErrors.push(...checkBrief(doc, brief.text, brief.name));
   const findings = validationErrors.length ? [] : doc.findings;
   const matchedIds = new Set();
   const detected = [];
@@ -108,16 +111,26 @@ export function formatReport(r) {
 
 function main(argv) {
   const args = argv.slice(2);
-  const minIdx = args.indexOf("--min-recall");
-  const minRecall = minIdx >= 0 ? Number(args.splice(minIdx, 2)[1]) : 0.9;
+  const option = (name) => {
+    const idx = args.indexOf(name);
+    return idx >= 0 ? args.splice(idx, 2)[1] : undefined;
+  };
+  const minRecallArg = option("--min-recall");
+  const minRecall = minRecallArg === undefined ? 0.9 : Number(minRecallArg);
+  const reportPath = option("--report");
+  const briefPath = option("--brief");
   if (args.length !== 2 || Number.isNaN(minRecall)) {
-    console.error("usage: score.mjs <findings.json> <answer-key.json> [--min-recall 0.9]");
+    console.error("usage: score.mjs <findings.json> <answer-key.json> [--min-recall 0.9] [--report <review.md>] [--brief <brief.md>]");
     return 2;
   }
   const [findingsPath, keyPath] = args;
   const doc = JSON.parse(readFileSync(findingsPath, "utf8"));
   const key = JSON.parse(readFileSync(keyPath, "utf8"));
-  const result = score(doc, key, { minRecall });
+  const result = score(doc, key, {
+    minRecall,
+    report: reportPath && readFileSync(reportPath, "utf8"),
+    brief: briefPath && { text: readFileSync(briefPath, "utf8"), name: basename(briefPath) },
+  });
   console.log(formatReport(result));
   return result.pass ? 0 : 1;
 }

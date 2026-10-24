@@ -84,8 +84,10 @@ evals/run.sh 02-microservices-distributed-tx
 Score an existing result:
 
 ```
-node evals/score.mjs evals/results/02-microservices-distributed-tx/architecture-findings.json \
-  evals/answer-keys/02-microservices-distributed-tx.json
+node evals/score.mjs evals/results/r4/02-microservices-distributed-tx/architecture-findings.json \
+  evals/answer-keys/02-microservices-distributed-tx.json \
+  --report evals/results/r4/02-microservices-distributed-tx/architecture-review.md
+# design mode: add --brief fixtures/04-design-brief/project-brief.md
 ```
 
 A run passes when the findings file is valid (and, with `--report` and `--brief`, the report layout and design-mode quotes check out), at least 90% of the `must_detect` keys are found, and no control finding is above the key's max severity. Control findings that name an already-implemented pattern are listed as warnings for review by hand. Findings that aren't in the key are listed too; they are often real issues the key doesn't cover.

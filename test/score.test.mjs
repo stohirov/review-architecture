@@ -123,3 +123,14 @@ test("every answer key is well-formed", () => {
     assert.ok(k.expected.length > 0 || k.control, `${name}: needs expected findings or a control block`);
   }
 });
+
+test("report and brief checks fail the score when given", () => {
+  const d = doc([finding()]);
+  const bad = score(d, { ...key, expected: [] }, { report: "# nothing\n" });
+  assert.equal(bad.pass, false);
+  assert.ok(bad.validationErrors.some((e) => e.startsWith("report:")));
+  const design = doc([finding({ locations: [{ file: "brief.md", section: "Payments" }], evidence: '"a passage that is not in the brief"' })], { mode: "design" });
+  const r = score(design, { ...key, mode: "design", expected: [] }, { brief: { text: "## Payments\nText.\n", name: "brief.md" } });
+  assert.ok(r.validationErrors.some((e) => e.startsWith("brief:")));
+  assert.equal(score(d, { ...key, expected: [] }).pass, true);
+});

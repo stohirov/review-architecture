@@ -31,4 +31,7 @@ fi
 out="$repo/evals/results/$fixture"
 mkdir -p "$out"
 cp "$work/architecture-findings.json" "$work/architecture-review.md" "$out/"
-node "$repo/evals/score.mjs" "$out/architecture-findings.json" "$key" | tee "$out/score.txt"
+brief_args=()
+[[ "$mode" == "design" ]] && brief_args=(--brief "$src/project-brief.md")
+node "$repo/evals/score.mjs" "$out/architecture-findings.json" "$key" \
+  --report "$out/architecture-review.md" "${brief_args[@]}" | tee "$out/score.txt"
