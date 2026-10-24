@@ -1,0 +1,496 @@
+{
+  "schema_version": 1,
+  "mode": "codebase",
+  "target": "01-monolith-unscalable (Shopfront)",
+  "profile": {
+    "architecture": "monolith",
+    "summary": "Shopfront: one Spring Boot deployable for a home-goods online store (catalog, session cart, checkout with stock decrement, order history, product images, monthly invoice emails) on one PostgreSQL database, run on k8s at 3 replicas with an HPA to 12. README expects ~20x traffic (~1,500 req/s) on Black Friday.",
+    "stack": ["Java 17", "Spring Boot 3.3.4 (web, data-jpa, mail, actuator)", "PostgreSQL (JDBC driver)", "Maven", "Kubernetes Deployment + HPA"],
+    "deployables": ["shopfront (.): all features; db=PostgreSQL shopfront; calls=SMTP provider via JavaMailSender; no broker"],
+    "datastores": ["PostgreSQL 'shopfront' (only shopfront uses it; schema via ddl-auto=update)", "Tomcat in-memory HttpSession (cart)", "per-pod emptyDir /var/shopfront/uploads (product images)", "per-pod ConcurrentHashMap price cache"],
+    "messaging": [],
+    "lenses_run": ["scalability", "persistence", "operability", "data-consistency", "resilience", "service-boundaries"]
+  },
+  "findings": [
+    {
+      "id": "SC-001",
+      "lens": "scalability",
+      "title": "Shopping cart lives in Tomcat HttpSession memory on a 3-12 replica deployment",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/cart/CartController.java", "line": 37 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 30 },
+        { "file": "k8s/deployment.yaml", "line": 43 },
+        { "file": "pom.xml", "line": 18 }
+      ],
+      "evidence": "static Cart cartOf(HttpSession session) {\n    Cart cart = (Cart) session.getAttribute(CART);\n    if (cart == null) { cart = new Cart(); session.setAttribute(CART, cart); }\n// OrderController.checkout: Cart cart = (Cart) session.getAttribute(\"cart\");\n// pom.xml: no spring-session-*; HPA minReplicas: 3, maxReplicas: 12",
+      "failure_scenario": "A shopper's cart is held in pod A's memory. The ingress (no session affinity visible in the repo) routes the next add-to-cart or the checkout to pod B, which creates an empty session: the cart vanishes or checkout fails with 'Cart is empty'. Even with sticky sessions, every rolling deploy, crash or HPA scale-in deletes the carts on the pods it removes, and scale-out cannot move existing sticky users onto new pods. On Black Friday the HPA churns pods constantly, so carts are lost at the peak.",
+      "recommendation": "Externalize the session with spring-session-jdbc on the existing Postgres (or spring-session-data-redis if Redis is available), or persist the cart as a DB row keyed by a cart-id cookie. Cart is mutated in place after getAttribute and never re-set, so with Spring Session either call session.setAttribute after each mutation or set SaveMode.ALWAYS, or changes are silently dropped. Remove any reliance on sticky sessions.",
+      "pattern": "externalize-session",
+      "applies_when": "The Deployment always runs at least 3 replicas and autoscales to 12, and the cart must survive from browsing to checkout across pods and deploys.",
+      "effort": "medium"
+    },
+    {
+      "id": "SC-002",
+      "lens": "scalability",
+      "title": "Product images written to a per-pod emptyDir and read back from whichever pod serves the GET",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 43 },
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 51 },
+        { "file": "k8s/deployment.yaml", "line": 32 },
+        { "file": "src/main/resources/application.yml", "line": 18 }
+      ],
+      "evidence": "file.transferTo(new File(mediaDir, fileName));\nproduct.setImageFile(fileName);\nreturn products.save(product);\n...\nFile image = new File(mediaDir, product.getImageFile());\nif (!image.exists()) { return ResponseEntity.notFound().build(); }\n# deployment.yaml\nvolumes:\n  - name: uploads\n    emptyDir: {}",
+      "failure_scenario": "An admin uploads an image; it lands on pod A only, but the DB row now points every pod at that file name. With 3 replicas about 2 of 3 image requests return 404; at 12 replicas about 11 of 12. When pod A is restarted, rescheduled, rolled or scaled in, its emptyDir is deleted and the image is gone permanently while Product.imageFile still names it. New HPA pods start with an empty directory. Image bytes are also streamed through Tomcat request threads that checkout needs at peak. Secondary: if the DB save fails after transferTo, an orphan file is left behind, and re-uploads never delete the previous file.",
+      "recommendation": "Store images in object storage (S3, GCS or MinIO) and keep only the object key in Product.imageFile. Serve images from a CDN or pre-signed URLs rather than through the app. Write the object first, then update only the image column in a short transaction; clean up superseded objects after commit or with a periodic sweep. Copy existing files off the pods before cut-over.",
+      "pattern": "object-storage",
+      "applies_when": "More than one replica serves image requests and images must outlive the upload request and the pod that received it.",
+      "effort": "medium"
+    },
+    {
+      "id": "SC-003",
+      "lens": "scalability",
+      "title": "Checkout charges a per-pod cached price that is never invalidated on other replicas",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductService.java", "line": 15 },
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductService.java", "line": 34 },
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductService.java", "line": 41 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 42 }
+      ],
+      "evidence": "private final Map<Long, BigDecimal> priceCache = new ConcurrentHashMap<>();\npublic BigDecimal currentPrice(Long productId) {\n    return priceCache.computeIfAbsent(productId, id -> get(id).getPrice());\n}\n@Transactional public Product updatePrice(...) { ... product.setPrice(newPrice); priceCache.put(productId, newPrice); ... }\n// OrderService.checkout:\norder.addLine(new OrderLine(order, product, quantity, productService.currentPrice(product.getId())));",
+      "failure_scenario": "Before Black Friday marketing sets a sale price with PUT /api/products/42/price. The request lands on pod A, so only A's map changes. Pods B and C cached the old price at their first checkout of that SKU and keep it until restart (no TTL). GET /api/products/42 reads the DB and shows the sale price, but checkouts routed to B or C record the old price in OrderLine.unitPrice and CustomerOrder.total, and the monthly invoice bills that wrong amount. Pods started later by the HPA load the new price, so the same SKU sells at different prices depending on the pod. updatePrice also writes the cache before commit, so a price change that fails to commit still poisons pod A. Direct DB edits are never picked up.",
+      "recommendation": "Remove priceCache from the checkout path and price each line from product.getPrice() on the row already loaded in the checkout transaction (OrderService line 35); this costs no extra query. If catalog reads later need caching, use a short-TTL cache for display only, or Redis with invalidation after commit, and never price an order from a cache.",
+      "pattern": "cache-invalidation",
+      "applies_when": "Prices change for campaigns, the service runs 3-12 replicas, and the cached value is what the customer is charged and invoiced.",
+      "effort": "small"
+    },
+    {
+      "id": "SC-004",
+      "lens": "scalability",
+      "title": "MonthlyInvoiceJob runs on every replica, so every customer gets 3-12 copies of each invoice",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 32 },
+        { "file": "src/main/java/com/example/shopfront/ShopfrontApplication.java", "line": 8 },
+        { "file": "k8s/deployment.yaml", "line": 6 }
+      ],
+      "evidence": "@Scheduled(cron = \"0 0 2 1 * *\")\n@Transactional\npublic void sendInvoices() {\n    List<CustomerOrder> pending = orders.findByInvoicedFalse();\n    ... mailSender.send(message); order.markInvoiced();\n// @EnableScheduling on ShopfrontApplication; replicas: 3 (HPA to 12); no ShedLock, @SchedulerLock, LockProvider, clustered Quartz or k8s CronJob",
+      "failure_scenario": "At 02:00 on the 1st, every pod (at least 3, up to 12 after a campaign) fires the job at the same time. Each reads the same un-invoiced orders, because markInvoiced becomes visible only when each pod commits at the end of its loop. Each pod emails every customer an 'Amount due' invoice, so customers receive 3-12 identical invoices and some pay more than once. The burst can also get the sender throttled or flagged as spam by the mail provider. This happens every month without any fault, and scaling out makes it worse.",
+      "recommendation": "Run the job exactly once: ShedLock with the JDBC provider on the existing Postgres (@SchedulerLock with lockAtMostFor sized to the run), or move it to a k8s CronJob running a one-shot profile with @Scheduled disabled in the Deployment. Combine with the per-order claim in DC-004 so that even an overlapping run cannot double-send.",
+      "pattern": "distributed-lock",
+      "applies_when": "The job has external, money-bearing side effects that must happen once, and the Deployment never runs fewer than 3 replicas.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-001",
+      "lens": "data-consistency",
+      "title": "Concurrent checkouts oversell stock: check-then-set on Product.stock with no locking",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 35 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 37 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 40 },
+        { "file": "src/main/java/com/example/shopfront/catalog/Product.java", "line": 21 }
+      ],
+      "evidence": "Product product = productService.get(entry.getKey());\nint quantity = entry.getValue();\nif (product.getStock() < quantity) { throw new OutOfStockException(product.getSku()); }\nproduct.setStock(product.getStock() - quantity);\nproducts.save(product);\n// Product: private int stock; no @Version; ProductRepository has no @Lock or @Modifying query; Postgres default READ COMMITTED",
+      "failure_scenario": "A Black Friday doorbuster has stock=1. Two checkouts on any pods both run findById and read stock=1, both pass the check, and both flush UPDATE product SET stock=0. Both commit, so two customers are sold one unit. At ~1,500 req/s concentrated on a few campaign SKUs this repeats constantly, and because stock never goes negative nothing signals the oversell. A naive pessimistic lock in today's transaction would also hold the row lock across the SMTP send (DC-003), serializing every checkout of that SKU behind the mail server.",
+      "recommendation": "Decrement atomically in the database: @Modifying @Query(\"update Product p set p.stock = p.stock - :qty where p.id = :id and p.stock >= :qty\") and throw OutOfStockException when it updates 0 rows. Process cart lines in ascending product id so multi-item carts cannot deadlock. Add CHECK (stock >= 0) as a backstop via a real migration (PS-003). Fix DC-003 first or together, so any row lock is held for milliseconds, not for an SMTP round trip.",
+      "pattern": "pessimistic-locking",
+      "applies_when": "Stock is a hot shared row written by concurrent checkouts across 3-12 replicas, with heavy contention on a few SKUs expected on Black Friday.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-002",
+      "lens": "data-consistency",
+      "title": "Image upload and checkout write back stale stock and price with full-row UPDATEs",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 41 },
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 45 },
+        { "file": "src/main/java/com/example/shopfront/catalog/Product.java", "line": 10 },
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductService.java", "line": 40 }
+      ],
+      "evidence": "Product product = productService.get(productId);        // loaded at request start\nfile.transferTo(new File(mediaDir, fileName));             // seconds for a large file\nproduct.setImageFile(fileName);\nreturn products.save(product);                             // UPDATE writes every column, incl. stock and price\n// Product: no @Version, no @DynamicUpdate",
+      "failure_scenario": "An admin uploads an image for a product with stock=50. During the transfer, 10 checkouts commit stock=40. The upload's save then flushes UPDATE product SET stock=50, price=<old>, image_file=..., so 10 sold units become available again and are oversold later, and a price change committed in the same window is reverted. The same happens between checkout and updatePrice: a checkout that loaded the product before an admin's price change, and then waits on SMTP inside its transaction, commits a full-row UPDATE that writes the old price back while pod A's priceCache holds the new one.",
+      "recommendation": "Add @Version to Product so stale writes fail with an OptimisticLockException instead of silently overwriting. Make the image upload update only its column (@Modifying update Product set imageFile = :f where id = :id) in a short transaction after the file is stored, and keep stock on the atomic decrement from DC-001. @DynamicUpdate is an extra backstop.",
+      "pattern": "optimistic-locking",
+      "applies_when": "Product rows are written by three independent paths (checkout, price update, image upload) that run concurrently while the shop is live.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-003",
+      "lens": "data-consistency",
+      "title": "Order confirmation email is sent over SMTP inside the checkout transaction",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 31 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 45 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 58 }
+      ],
+      "evidence": "@Transactional\npublic CustomerOrder checkout(String customerEmail, Cart cart) {\n    ...\n    CustomerOrder saved = orders.save(order);\n    sendConfirmation(saved);   // -> mailSender.send(message);\n    return saved;\n}",
+      "failure_scenario": "(1) The SMTP provider throttles or rejects at 20x mail volume: send throws MailException, the whole checkout rolls back, and nobody can buy while mail is unhealthy, so a notification takes down the revenue path. (2) SMTP is slow or hangs (RS-001): each checkout holds a Tomcat thread, a Hikari connection (default pool 10) and the product row locks for the whole send; the pool drains and catalog, cart and history on that pod fail too; the HPA does not react because blocked threads use no CPU. (3) The send succeeds, then the commit fails (DB failover, pod killed with no graceful shutdown): the customer has a confirmation for an order that does not exist and the stock decrement is rolled back.",
+      "recommendation": "Commit the order first, then send. Publish an OrderPlaced application event and send from @TransactionalEventListener(phase = AFTER_COMMIT) on a bounded @Async executor with retry and backoff. If a confirmation must never be lost, write a notification_outbox row in the checkout transaction and have a relay send and mark it (one pod, or claim rows with FOR UPDATE SKIP LOCKED). Either way add SMTP timeouts (RS-001).",
+      "pattern": "after-commit-hook",
+      "applies_when": "Checkout is the revenue path at a stated 1,500 req/s peak, and the confirmation email is not needed to answer the request correctly.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-004",
+      "lens": "data-consistency",
+      "title": "Invoice job wraps every SMTP send in one all-or-nothing transaction, so a mid-run failure re-sends all invoices",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 33 },
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 35 },
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 43 },
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 44 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderRepository.java", "line": 11 }
+      ],
+      "evidence": "@Transactional\npublic void sendInvoices() {\n    List<CustomerOrder> pending = orders.findByInvoicedFalse();   // no paging\n    for (CustomerOrder order : pending) {\n        ... mailSender.send(message);\n        order.markInvoiced();\n    }\n}",
+      "failure_scenario": "The 1 December run loads every Black Friday month order into one persistence context and holds one transaction and connection open while it emails them one by one, possibly for hours given no SMTP timeouts. At order 4,000 of 30,000 a send fails (provider rate limit, a rejected address) or the pod is terminated (scale-in, node drain, deploy). The transaction rolls back: 3,999 customers have received an invoice whose invoiced flag reverts to false, and 26,000 get nothing. The next run, manual or next month, re-sends the 3,999. One bad address blocks invoicing for everyone, and the long transaction blocks vacuum on customer_order the whole time.",
+      "recommendation": "Make each order's invoicing its own short unit of work. Page through un-invoiced ids with keyset pagination. For each order (or chunk of a few hundred), claim it in a short transaction (UPDATE customer_order SET invoice_status='SENDING' WHERE id=:id AND invoice_status='PENDING', or SELECT ... FOR UPDATE SKIP LOCKED), send outside the transaction, then mark SENT or FAILED in another short transaction. Retry FAILED with backoff instead of aborting the run. Use the order id plus billing period as the Message-ID/idempotency key with the mail provider.",
+      "pattern": "idempotency-key",
+      "applies_when": "Invoices are money-bearing customer communications, and the first run after Black Friday is the year's largest batch, so a mid-run failure is likely.",
+      "effort": "medium"
+    },
+    {
+      "id": "DC-005",
+      "lens": "data-consistency",
+      "title": "Checkout POST is not idempotent: a retry or double-submit creates a second order",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 29 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 34 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 35 },
+        { "file": "src/main/java/com/example/shopfront/cart/Cart.java", "line": 9 }
+      ],
+      "evidence": "public OrderSummary checkout(@RequestParam String email, HttpSession session) {\n    Cart cart = (Cart) session.getAttribute(\"cart\");\n    ...\n    CustomerOrder order = orderService.checkout(email, cart);\n    cart.clear();   // only after commit\n// no idempotency key, no unique constraint; Cart wraps a non-thread-safe LinkedHashMap shared by concurrent requests in one session",
+      "failure_scenario": "Checkout is slow under load or while SMTP is slow (DC-003). The shopper or the frontend's HTTP client gives up and submits again on the same session. The first request has not reached cart.clear(), so the second reads the same cart and runs OrderService.checkout as well. Both commit: two orders, stock decremented twice, two confirmation emails and later two invoices. A plain double-click has the same effect, since nothing serializes checkouts per session. The frontend is not in the repo, so whether it blocks resubmission is unknown (hence medium confidence).",
+      "recommendation": "Have the client send an Idempotency-Key (a checkout token minted when the cart is shown). Store it on customer_order with a unique constraint in the checkout transaction; on a duplicate, return the existing order instead of creating a new one. Snapshot the cart contents into the request rather than iterating the live session object.",
+      "pattern": "idempotency-key",
+      "applies_when": "Checkout has user-visible side effects (stock, email, invoice), and slow responses at Black Friday load make retries and double-submits likely.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-001",
+      "lens": "resilience",
+      "title": "No SMTP timeouts: a hung mail server pins request threads and DB connections indefinitely",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/resources/application.yml", "line": 11 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 58 },
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 43 }
+      ],
+      "evidence": "mail:\n  host: ${SMTP_HOST:smtp.mailprovider.com}\n  port: 587\n  username: ${SMTP_USER}\n  password: ${SMTP_PASSWORD}\n# no spring.mail.properties.mail.smtp.connectiontimeout / timeout / writetimeout; Jakarta Mail defaults are infinite",
+      "failure_scenario": "The SMTP server accepts the TCP connection and then stalls, or packets are blackholed. Each checkout blocks in mailSender.send with no deadline while holding a Hikari connection. After 10 such checkouts on a pod, every DB-backed endpoint waits 30 s for a connection and fails; the stuck threads never return. Blocked threads use no CPU, so the HPA does not scale, and there is no liveness probe to restart the pod. The mail health indicator hangs too (OP-001), so readiness probes time out and pods leave the load balancer. The store is down until someone restarts pods by hand.",
+      "recommendation": "Set spring.mail.properties.mail.smtp.connectiontimeout=2000, mail.smtp.timeout=5000 and mail.smtp.writetimeout=5000. With DC-003 fixed, mail is no longer on the request path, so this protects the async sender and the invoice job; until then it is the one-line fix that bounds the damage.",
+      "pattern": "timeouts",
+      "applies_when": "SMTP is an external provider called on the checkout path and in the invoice job, and the calls hold pooled DB connections the rest of the app shares.",
+      "effort": "small"
+    },
+    {
+      "id": "PS-001",
+      "lens": "persistence",
+      "title": "Default Hikari pool times HPA maxReplicas (12 x 10 = 120) exceeds Postgres's default connection limit",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "src/main/resources/application.yml", "line": 4 },
+        { "file": "k8s/deployment.yaml", "line": 44 }
+      ],
+      "evidence": "datasource:\n  url: jdbc:postgresql://${DB_HOST:localhost}:5432/shopfront\n  # no spring.datasource.hikari.* (maximumPoolSize=10, minimumIdle=10, connectionTimeout=30s)\n# HPA: maxReplicas: 12",
+      "failure_scenario": "Black Friday load pushes the HPA from 3 toward 12 pods, and each pod opens 10 connections at startup. Around the 10th pod, 100+ connections exceed Postgres's default max_connections of 100 (minus reserved superuser slots). New pods get 'FATAL: sorry, too many clients already', fail the DB health check and never become ready, and existing pods cannot replace recycled connections. The scale-out meant to add capacity fails at peak traffic. The DB's real max_connections is not in the repo, hence medium confidence.",
+      "recommendation": "Budget connections explicitly: maxReplicas x maximum-pool-size + admin headroom <= max_connections. Set spring.datasource.hikari.maximum-pool-size (for example 6-8) with a lower minimum-idle and a connection-timeout of 2-3 s so callers fail fast, or put PgBouncer in transaction mode in front of Postgres. Load-test at 12 replicas before Black Friday.",
+      "pattern": "connection-pool-sizing",
+      "applies_when": "The HPA is configured to scale to 12 replicas against a single Postgres instance, and the README plans to use that headroom on Black Friday.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-001",
+      "lens": "operability",
+      "title": "Readiness probe includes SMTP health and there is no liveness probe: a mail outage pulls every pod out of service",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "k8s/deployment.yaml", "line": 23 },
+        { "file": "pom.xml", "line": 29 },
+        { "file": "src/main/resources/application.yml", "line": 21 }
+      ],
+      "evidence": "readinessProbe:\n  httpGet:\n    path: /actuator/health\n    port: 8080\n# no livenessProbe, no timeoutSeconds (k8s default 1 s); spring-boot-starter-mail + spring.mail.host auto-configures MailHealthIndicator, which rolls up into /actuator/health with the db indicator; management.health.mail.enabled not set",
+      "failure_scenario": "The SMTP provider slows down or fails. MailHealthIndicator.testConnection() fails, or hangs past the 1 s probe timeout (no SMTP timeouts, RS-001), on every pod at the same moment. Kubernetes marks every replica NotReady, the Service has no endpoints, and the ingress returns 503 for catalog, cart and checkout: the whole shop goes dark because of a dependency that only sends email. At peak, the db indicator also waits for a Hikari connection held by checkouts stuck on SMTP, so pods flip unready one by one and load piles onto the rest. With no liveness probe, a pod whose threads are all stuck is never restarted.",
+      "recommendation": "Point readiness at /actuator/health/readiness and add a livenessProbe on /actuator/health/liveness (set management.endpoint.health.probes.enabled=true). Set management.health.mail.enabled=false, or keep mail out of every probe group; include db in readiness only. Set explicit timeoutSeconds, periodSeconds and failureThreshold, plus a startupProbe.",
+      "pattern": "health-probes",
+      "applies_when": "The probe gates traffic for every replica on k8s, and SMTP is not needed to serve the catalog, the cart or (once DC-003 is fixed) checkout.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-002",
+      "lens": "operability",
+      "title": "HPA cannot scale on CPU utilization: the container has no CPU request, and CPU is the wrong signal for this I/O-bound app",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "k8s/deployment.yaml", "line": 16 },
+        { "file": "k8s/deployment.yaml", "line": 45 }
+      ],
+      "evidence": "containers:\n  - name: shopfront\n    image: registry.example.com/shopfront:1.4.0\n    # no resources: block\n...\nmetrics:\n  - type: Resource\n    resource:\n      name: cpu\n      target:\n        type: Utilization\n        averageUtilization: 70",
+      "failure_scenario": "A Utilization target is computed against resources.requests.cpu, which the container does not set. Unless a namespace LimitRange outside the repo injects a default (hence medium confidence), the HPA reports 'missing request for cpu' and never scales: the fleet stays at 3 replicas on Black Friday while the plan assumes 12. Even with requests, checkout spends its time blocked on SMTP and the DB, so CPU stays low while Tomcat threads and the Hikari pool are exhausted, and the HPA reacts only after latency has collapsed. Without requests the pods are also BestEffort QoS, first to be evicted under node pressure. There is no rate limiting either, so the service fails slowly instead of shedding load.",
+      "recommendation": "Add resources.requests (cpu, memory) and a memory limit sized from a load test, and verify with kubectl describe hpa in the target namespace. Pre-scale minReplicas for the campaign window. Once metrics exist (OP-005), consider scaling on request rate or latency, and add rate limiting for checkout and search at the ingress.",
+      "pattern": "metrics-and-alerts",
+      "applies_when": "The Black Friday plan relies on the HPA scaling from 3 to 12 for a ~20x traffic spike.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-003",
+      "lens": "operability",
+      "title": "No authentication boundary: price changes, image uploads and any customer's order history are open to anyone",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductController.java", "line": 37 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 39 },
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 39 },
+        { "file": "pom.xml", "line": 18 }
+      ],
+      "evidence": "@PutMapping(\"/{id}/price\") public Product updatePrice(@PathVariable Long id, @RequestBody BigDecimal price)\n@GetMapping public List<OrderSummary> history(@RequestParam String email)\n@PostMapping public Product upload(@PathVariable Long productId, @RequestParam(\"file\") MultipartFile file)\n// no spring-boot-starter-security in pom.xml; ingress manifest not in the repo",
+      "failure_scenario": "Admin and customer endpoints share one surface with no authentication in the app. Anyone who can reach the ingress can PUT /api/products/42/price with 0.01 and check out at that price, read another customer's order history with GET /api/orders?email=victim@example.com, or write arbitrary files to a pod's disk. This holds unless the ingress, which is not in the repo, blocks these paths (hence medium confidence).",
+      "recommendation": "Add an authentication boundary (Spring Security, or auth at the ingress or gateway). Keep admin endpoints (price, image upload) off the public ingress or behind admin auth, and scope order history to the authenticated customer. Commission a dedicated security review for depth.",
+      "pattern": "api-gateway",
+      "applies_when": "A public storefront exposes admin mutations and customer PII through the same ingress.",
+      "effort": "medium"
+    },
+    {
+      "id": "SC-005",
+      "lens": "scalability",
+      "title": "Catalog list and search return unbounded result sets with full-table scans",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductController.java", "line": 25 },
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductService.java", "line": 22 },
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductRepository.java", "line": 9 }
+      ],
+      "evidence": "@GetMapping public List<Product> list(@RequestParam(required = false) String q) { ... return productService.listAll(); }\n// -> products.findAll()\nList<Product> findByNameContainingIgnoreCase(String query);   // lower(name) like '%q%', no Pageable",
+      "failure_scenario": "Browsing is likely most of the 1,500 req/s peak. Every GET /api/products reads and serializes the whole product table, descriptions included, and every search is a leading-wildcard sequential scan, all on the single Postgres primary with no HTTP caching. DB CPU grows with catalog size times request rate, and adding pods does not help because the shared DB saturates first and drags checkout latency down with it. Catalog size is unknown, hence medium confidence.",
+      "recommendation": "Add Pageable with a capped page size and return a lightweight DTO. Put Cache-Control or a CDN, or a short-TTL cache, in front of the read-mostly catalog list. For search, add a pg_trgm GIN index or Postgres full-text search, with a result limit.",
+      "pattern": "pagination",
+      "applies_when": "Catalog reads are the hot path at 20x traffic on one shared database, and the catalog grows over time.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-002",
+      "lens": "resilience",
+      "title": "No JDBC socket or statement timeouts and a 30 s pool wait on the request path",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "src/main/resources/application.yml", "line": 5 }
+      ],
+      "evidence": "url: jdbc:postgresql://${DB_HOST:localhost}:5432/shopfront\n# no socketTimeout, no statement_timeout, no spring.datasource.hikari.connection-timeout (default 30 s)",
+      "failure_scenario": "The Postgres primary fails over or a network path silently drops. pgjdbc's socketTimeout defaults to 0, so threads reading on dead connections block until TCP keepalive gives up (hours with Linux defaults). Under 20x load a slow query (for example the unbounded findAll in SC-005) runs with no statement timeout. Either way the pooled connections stay busy, new requests wait the full 30 s for a connection and then fail, and Tomcat threads pile up long before any error reaches the client.",
+      "recommendation": "Add socketTimeout (for example 30) and options=-c statement_timeout=5000 to the JDBC URL, or set jakarta.persistence.query.timeout. Set spring.datasource.hikari.connection-timeout to about 2-3 s so callers fail fast under pool saturation (sized together with PS-001).",
+      "pattern": "timeouts",
+      "applies_when": "The DB is on every key flow and peak load is expected at 20x normal.",
+      "effort": "small"
+    },
+    {
+      "id": "PS-002",
+      "lens": "persistence",
+      "title": "Order history is unpaginated N+1 over lazy lines and products, with no indexes on its lookup columns",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 41 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 50 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderRepository.java", "line": 9 },
+        { "file": "src/main/java/com/example/shopfront/order/CustomerOrder.java", "line": 36 }
+      ],
+      "evidence": "return orderService.history(email).stream().map(OrderSummary::of).toList();\n// OrderSummary.of:\norder.getLines().stream().map(l -> new LineSummary(l.getProduct().getSku(), l.getProduct().getName(), ...))\n@OneToMany(mappedBy = \"order\", cascade = CascadeType.ALL) private List<OrderLine> lines;   // lazy\nList<CustomerOrder> findByCustomerEmailOrderByPlacedAtDesc(String customerEmail);   // no Pageable, no fetch plan\n// no @Table(indexes) and no migrations anywhere",
+      "failure_scenario": "A customer with 40 orders of 3 lines triggers 1 + 40 + up to 120 queries per history request, fired from the controller through open-in-view. The first query scans customer_order (no index on customer_email), and each of the 40 lines queries scans order_line, because Postgres does not index the order_line.order_id foreign key automatically. As order tables grow with every checkout, each history page costs dozens of scans of the largest tables on the same DB and pool that checkout needs, which hurts most during post-campaign 'where is my order' traffic.",
+      "recommendation": "Fetch lines and products in one query (@EntityGraph(attributePaths = {\"lines\", \"lines.product\"}) or a DTO projection), set hibernate.default_batch_fetch_size as a backstop, and paginate history. In a versioned migration (PS-003) add indexes on customer_order(customer_email, placed_at DESC), order_line(order_id) and order_line(product_id), built CONCURRENTLY.",
+      "pattern": "entity-graph",
+      "applies_when": "Order tables grow with every checkout, and history is a customer-facing endpoint sharing the pool with checkout.",
+      "effort": "small"
+    },
+    {
+      "id": "PS-003",
+      "lens": "persistence",
+      "title": "Schema managed by ddl-auto=update on every pod, with no versioned migrations",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/resources/application.yml", "line": 10 },
+        { "file": "pom.xml", "line": 18 }
+      ],
+      "evidence": "jpa:\n  hibernate:\n    ddl-auto: update\n# no flyway-core or liquibase-core in pom.xml",
+      "failure_scenario": "A release adds a column to product or customer_order. During the rolling deploy, each new pod runs its own schema diff; the first ALTER TABLE needs an ACCESS EXCLUSIVE lock and waits behind in-flight checkout transactions (which hold product rows during the SMTP send), and every later query on that table queues behind it, stalling checkout on all pods. A NOT NULL primitive column fails against populated tables, Hibernate logs it and starts anyway, and the new code then fails at runtime. Renames and drops are never applied, environments drift, and the indexes and constraints other findings need (PS-002, DC-001, DC-005) have no reviewed path into production.",
+      "recommendation": "Adopt Flyway: baseline the current schema, set ddl-auto=validate in production, set lock_timeout in migrations, and use expand-contract for renames and drops. Run migrations once (Flyway's lock-protected migrate, or a Job/initContainer) before the rollout. Ship the missing indexes and constraints as the first migrations.",
+      "pattern": "versioned-migrations",
+      "applies_when": "A production shop with 3-12 replicas and rolling deploys against one shared schema.",
+      "effort": "medium"
+    },
+    {
+      "id": "PS-004",
+      "lens": "persistence",
+      "title": "Open Session in View left enabled on an API service",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/resources/application.yml", "line": 8 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderController.java", "line": 50 }
+      ],
+      "evidence": "jpa:\n  hibernate:\n    ddl-auto: update\n# spring.jpa.open-in-view not set (defaults to true, with a startup warning); OrderSummary.of walks lazy associations in the controller",
+      "failure_scenario": "Lazy loads in history mapping run from the controller, outside any service transaction, which hides the N+1 in PS-002. The image upload request keeps its managed Product open across the multipart disk write, which widens the stale-write window in DC-002. Under peak load, persistence work spread across whole requests adds pressure on the 10-connection pool that checkout needs.",
+      "recommendation": "Set spring.jpa.open-in-view=false and build DTOs inside @Transactional(readOnly = true) service methods using the fetch plan from PS-002.",
+      "pattern": "disable-open-in-view",
+      "applies_when": "A REST API service whose controllers traverse lazy associations.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-004",
+      "lens": "operability",
+      "title": "No graceful shutdown: every rolling deploy or HPA scale-in cuts in-flight requests",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        { "file": "pom.xml", "line": 9 },
+        { "file": "src/main/resources/application.yml", "line": 1 },
+        { "file": "k8s/deployment.yaml", "line": 15 }
+      ],
+      "evidence": "spring-boot-starter-parent 3.3.4   (server.shutdown defaults to immediate before Boot 3.4)\n# application.yml: no server.shutdown, no spring.lifecycle.timeout-per-shutdown-phase\n# deployment.yaml: no preStop hook, no terminationGracePeriodSeconds",
+      "failure_scenario": "After the campaign peak the HPA scales 12 down to 3, or a hotfix rolls out. SIGTERM reaches a pod before its endpoint is removed from the ingress, and Tomcat stops at once: in-flight requests get connection resets or 502s, and requests still routed during endpoint propagation hit a closed port. Checkouts cut after the email but before commit leave a confirmation for a rolled-back order (until DC-003 is fixed), and a deploy during the invoice run aborts its single transaction (DC-004).",
+      "recommendation": "Set server.shutdown=graceful and spring.lifecycle.timeout-per-shutdown-phase (for example 20s), add a preStop sleep of 5-10 s so endpoint removal finishes before draining, and set terminationGracePeriodSeconds above preStop plus drain time.",
+      "pattern": "graceful-shutdown",
+      "applies_when": "HPA autoscaling (3-12) and rolling deploys are in use during the highest-traffic window of the year.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-005",
+      "lens": "operability",
+      "title": "No metrics registry or alerts: Black Friday saturation will be discovered by customers",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/resources/application.yml", "line": 25 },
+        { "file": "pom.xml", "line": 18 }
+      ],
+      "evidence": "management:\n  endpoints:\n    web:\n      exposure:\n        include: health,info\n# no micrometer-registry-* dependency; no alerting config in the repo",
+      "failure_scenario": "At 20x traffic the Hikari pool fills because checkouts hold connections across the SMTP send; checkout p99 climbs and 5xx rise. Nothing records http.server.requests, hikaricp.connections.pending, Tomcat busy threads or mail-send errors, and no alert fires. The team learns about it from customers and has no data to tell DB, SMTP or CPU apart while it is happening.",
+      "recommendation": "Add micrometer-registry-prometheus, expose /actuator/prometheus and scrape it. Dashboard and alert on RED metrics per endpoint (checkout first), Hikari pending/active, Tomcat busy threads, JVM heap and GC, and SMTP send failures, plus business counters for orders placed and checkout failures by reason. Alert on error-rate and latency SLO burn against the assumed 99.9%.",
+      "pattern": "metrics-and-alerts",
+      "applies_when": "A production service heading into a known 20x peak.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-006",
+      "lens": "operability",
+      "title": "Default DB credential committed in config; the manifest wires no Secrets for DB or SMTP",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "src/main/resources/application.yml", "line": 7 },
+        { "file": "k8s/deployment.yaml", "line": 20 }
+      ],
+      "evidence": "username: ${DB_USER:shop}\npassword: ${DB_PASSWORD:shop}\n...\nenv:\n  - name: DB_HOST\n    value: shopfront-db\n# no DB_USER / DB_PASSWORD / SMTP_USER / SMTP_PASSWORD, no secretKeyRef or envFrom",
+      "failure_scenario": "The manifest in the repo supplies no DB password, so production either really runs on the committed shop/shop credential or receives secrets from somewhere untracked. If a Secret mount is dropped or renamed in a later change, the app does not fail fast: it silently falls back to shop/shop and either connects with a known password or fails at runtime with an unclear auth error. Credential wiring and rotation cannot be audited from the repo.",
+      "recommendation": "Remove the credential defaults so a missing value fails at startup, keep dev defaults in a local profile, and wire DB_USER, DB_PASSWORD, SMTP_USER and SMTP_PASSWORD from a k8s Secret (secretKeyRef or envFrom) or an external secrets manager, declared in the manifest.",
+      "pattern": "secrets-manager",
+      "applies_when": "Production credentials for the DB and the SMTP provider.",
+      "effort": "small"
+    },
+    {
+      "id": "SB-001",
+      "lens": "service-boundaries",
+      "title": "Order and media modules write catalog's Product directly; no module owns the stock invariant",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 19 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 41 },
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 28 },
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 45 },
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 21 },
+        { "file": "src/main/java/com/example/shopfront/order/OrderLine.java", "line": 24 }
+      ],
+      "evidence": "// order package\nprivate final ProductRepository products;\nproduct.setStock(product.getStock() - quantity); products.save(product);\n// media package\nprivate final ProductRepository products;\nproduct.setImageFile(fileName); return products.save(product);\n// billing package\nprivate final OrderRepository orders; ... order.markInvoiced();\n// OrderLine: @ManyToOne(fetch = FetchType.LAZY) private Product product;\n// no Spring Modulith or ArchUnit in pom.xml",
+      "failure_scenario": "Catalog exposes no stock or image operation, so order and media each load and save whole Product rows themselves, and billing mutates order entities through order's repository. This is why DC-001 and DC-002 exist: three modules write the same row with no shared rule. When the team fixes stock with an atomic decrement and @Version, the next feature that injects ProductRepository directly (a returns flow, an admin stock import) bypasses the fix and reintroduces overselling, because nothing stops a module reaching into another's persistence.",
+      "recommendation": "Keep one deployable but make it a modular monolith. Make catalog the only writer of Product: add ProductService.reserveStock(productId, qty) (the atomic decrement from DC-001) and attachImage(productId, key), and remove ProductRepository from OrderService and ProductImageController. Give order an invoicing API for billing. Store a product snapshot (productId, sku, name, unitPrice) on OrderLine instead of a cross-module @ManyToOne. Enforce it with Spring Modulith's ApplicationModules.verify() or an ArchUnit test.",
+      "pattern": "modular-monolith",
+      "applies_when": "The monolith has five business packages (catalog, cart, order, billing, media) and three of them change another module's entities, on the stock path that must be correct at Black Friday load.",
+      "effort": "medium"
+    },
+    {
+      "id": "OP-007",
+      "lens": "operability",
+      "title": "No correlation id or structured logs; a failed checkout cannot be traced across 3-12 pods",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/order/OrderService.java", "line": 32 },
+        { "file": "src/main/java/com/example/shopfront/billing/MonthlyInvoiceJob.java", "line": 36 }
+      ],
+      "evidence": "log.info(\"Sending {} invoices\", pending.size());   // the only log statement in the codebase\n// no Micrometer Tracing / OpenTelemetry, no MDC request-id filter, no JSON logging config; checkout logs nothing",
+      "failure_scenario": "A customer reports 'checkout failed but I got a confirmation email'. With up to 12 pods, unstructured logs, no request id and no log line in the checkout path, nobody can find which pod handled the request or whether its transaction rolled back after the mail was sent.",
+      "recommendation": "Add a request-id (or Micrometer Tracing) filter that puts an id in the MDC, use JSON structured logging (logstash encoder on Boot 3.3), and log checkout outcomes with the order id and failure reason.",
+      "pattern": "correlation-id",
+      "applies_when": "A single deployable with several replicas: a correlation id in logs is enough; full distributed tracing is not needed.",
+      "effort": "small"
+    },
+    {
+      "id": "SB-002",
+      "lens": "service-boundaries",
+      "title": "Catalog endpoints return the Product JPA entity, exposing stock counts and internal file names",
+      "severity": "low",
+      "confidence": "high",
+      "locations": [
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductController.java", "line": 25 },
+        { "file": "src/main/java/com/example/shopfront/catalog/ProductController.java", "line": 33 },
+        { "file": "src/main/java/com/example/shopfront/media/ProductImageController.java", "line": 40 }
+      ],
+      "evidence": "public List<Product> list(...)\npublic Product get(@PathVariable Long id)\npublic Product upload(...)\n// Product exposes getStock() and getImageFile() (on-disk name UUID-originalFilename); OrderController already maps to an OrderSummary record",
+      "failure_scenario": "The public JSON is the table schema. Moving images to object storage (SC-002) changes what imageFile means and silently changes the storefront API; adding a lazy association to Product would trigger LazyInitializationException or extra queries during serialization. Exact stock counts and internal storage names also reach every client.",
+      "recommendation": "Return a ProductView record (id, sku, name, description, price, imageUrl, inStock) from the catalog controllers, as OrderController already does with OrderSummary. Do it together with SC-002 so the image change does not leak to clients.",
+      "pattern": "api-versioning",
+      "applies_when": "The image storage change in SC-002 will alter Product.imageFile, which is currently part of the public API.",
+      "effort": "small"
+    },
+    {
+      "id": "SB-003",
+      "lens": "service-boundaries",
+      "title": "Do not split into microservices for Black Friday; the scaling blockers are per-pod state",
+      "severity": "info",
+      "confidence": "medium",
+      "locations": [
+        { "file": "README.md", "line": 13 }
+      ],
+      "evidence": "\"We currently run 3 replicas behind the ingress and the HPA scales to 12 for campaigns. Marketing expects roughly 20x normal traffic for Black Friday (peak around 1,500 req/s)\"",
+      "failure_scenario": "If the team responds to the Black Friday review by extracting catalog, order or billing into services, it adds network calls and turns the stock decrement into a distributed-consistency problem, while the real horizontal-scaling blockers (in-memory session, emptyDir images, per-pod price cache, scheduler on every pod) remain unless fixed directly.",
+      "recommendation": "Keep one deployable. Fix the per-pod state directly (SC-001 to SC-004) and tighten module seams (SB-001), so a later split stays possible if team or scaling pressures appear.",
+      "pattern": "modular-monolith",
+      "applies_when": "One team (assumed) and about 20 source files, with no part showing different scaling or deploy needs; 1,500 req/s is well within a stateless monolith on 12 replicas.",
+      "effort": "small"
+    }
+  ],
+  "strengths": [
+    "Single PostgreSQL database with local @Transactional checkout: stock, order and order lines commit atomically, so no saga or distributed transaction is needed. Keep it that way.",
+    "OrderLine stores unitPrice at order time, so order totals are a price snapshot and do not change when the catalog price changes later (once SC-003 is fixed, the snapshot is also the correct price).",
+    "Order endpoints return OrderSummary/LineSummary records instead of JPA entities, which is the pattern to copy for catalog (SB-002).",
+    "Money is held as BigDecimal throughout.",
+    "OrderLine's @ManyToOne associations are explicitly LAZY, avoiding eager-loading cascades.",
+    "The container image is pinned to an immutable version tag (shopfront:1.4.0) matching the pom version.",
+    "Environment-specific values (DB host, credentials, SMTP host) are read from environment placeholders rather than hardcoded per environment; actuator is present and a readiness probe exists to build on.",
+    "The monolith shape fits the team and scale: nothing here argues for microservices."
+  ]
+}

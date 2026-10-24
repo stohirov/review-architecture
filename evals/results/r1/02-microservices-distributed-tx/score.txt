@@ -1,0 +1,25 @@
+02-microservices-distributed-tx: PASS
+  findings: 24
+  recall: 10/11 (91%)
+    + http-in-tx-order <- DC-003
+    + http-in-tx-payment <- DC-004
+    + dual-write-no-outbox <- DC-002, DC-005, DC-003
+    + no-saga-compensation <- DC-001, DC-005, DC-004
+    + non-idempotent-consumer <- DC-002, DC-005, DC-007, MQ-003
+    + auto-commit-offsets <- MQ-002, MQ-003
+    + no-dlq <- MQ-001, MQ-002, MQ-003
+    + no-timeouts <- RS-001, RS-002
+    + shared-database <- SB-001
+    + unsafe-retries <- DC-001
+    - MISSED sync-call-chain
+  bonus: stock-lost-update, no-circuit-breaker, no-tracing, ddl-auto-update
+  not in answer key (review by hand):
+    ? OP-001 [high] Immediate shutdown (the Boot 3.3 default) cuts in-flight order and payment requests on every deploy
+    ? OP-002 [high] Database superuser credentials are committed in source and shared by all three services
+    ? DC-008 [medium] POST /orders has no idempotency key, so a client or gateway retry of a slow checkout creates a second order and charge
+    ? SC-001 [medium] order-events is never declared: with one partition, one consumer serves the whole fleet despite concurrency 3 on 2 replicas
+    ? PS-002 [medium] order_items.order_id has no index but is queried on every order-paid event
+    ? OP-003 [medium] Readiness ignores the DB and Kafka, and the probe wiring is not in the repo
+    ? OP-005 [medium] No metrics or alerts on checkout, payment, consumer lag or skipped stock decrements
+    ? OP-006 [medium] No auth boundary on any service, and the charge identity comes from the request body
+    ? PS-003 [low] Default Hikari pools are not sized against the shared Postgres connection limit

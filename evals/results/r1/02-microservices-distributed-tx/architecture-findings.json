@@ -1,0 +1,777 @@
+{
+  "schema_version": 1,
+  "mode": "codebase",
+  "target": "02-microservices-distributed-tx",
+  "profile": {
+    "architecture": "microservices",
+    "summary": "Order platform of three Spring Boot services owned by three teams. order-service accepts orders and charges them synchronously through payment-service, which captures money at an external PSP. order-service then publishes OrderPaidEvent to Kafka, and inventory-service consumes it to decrement stock. order-service and inventory-service share the `shop` database.",
+    "stack": [
+      "Java 17",
+      "Spring Boot 3.3.4",
+      "Spring Cloud 2023.0.3 (OpenFeign)",
+      "Spring Kafka",
+      "Spring Data JPA / Hibernate (ddl-auto=update)",
+      "PostgreSQL 16",
+      "Kafka 3.7 (KRaft, bitnami image)",
+      "Maven"
+    ],
+    "deployables": [
+      "order-service (order-service/): accepts orders, takes payment, publishes order-events; db=postgres shop (orders, order_items); calls payment-service POST /payments via Feign with Retryer.Default(100,1000,5)",
+      "payment-service (payment-service/): charges customers through the external PSP; db=postgres payments (payment); calls PSP POST /v1/captures via new RestTemplate()",
+      "inventory-service (inventory-service/): tracks stock, decrements it on order-events; db=postgres shop (stock_items, and reads order_items owned by order-service); consumes order-events (auto-commit, concurrency 3)"
+    ],
+    "datastores": [
+      "PostgreSQL 16, one instance: database `shop` SHARED by order-service and inventory-service (inventory reads order_items)",
+      "PostgreSQL 16, same instance: database `payments`, used only by payment-service"
+    ],
+    "messaging": [
+      "Kafka topic order-events (JSON OrderPaidEvent, no key, topic not declared in code), produced by order-service, consumed by inventory-service group inventory-service"
+    ],
+    "lenses_run": [
+      "scalability",
+      "persistence",
+      "operability",
+      "data-consistency",
+      "resilience",
+      "service-boundaries",
+      "messaging"
+    ]
+  },
+  "findings": [
+    {
+      "id": "DC-001",
+      "lens": "data-consistency",
+      "title": "Feign retries the non-idempotent POST /payments up to 5 times, so one order can charge a customer several times",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/config/FeignConfig.java",
+          "line": 13
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/OrderServiceApplication.java",
+          "line": 9
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 53
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/service/PaymentService.java",
+          "line": 24
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/domain/Payment.java",
+          "line": 20
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/psp/PspClient.java",
+          "line": 35
+        }
+      ],
+      "evidence": "// FeignConfig.java (applied to every client: @EnableFeignClients(defaultConfiguration = FeignConfig.class))\n/** Payment-service is occasionally slow under load; retry so checkout doesn't fail on a blip. */\nreturn new Retryer.Default(100, 1000, 5);\n\n// PaymentService.charge\nPayment payment = payments.save(new Payment(orderId, customerId, amount));\nPspClient.CaptureResponse response = psp.capture(customerId, amount);\n\n// Payment.java: random id, nothing unique on orderId\nprivate String id = UUID.randomUUID().toString();\nprivate Long orderId;\n\n// PspClient.capture: no idempotency key sent to the PSP\nnew HttpEntity<>(new CaptureRequest(customerId, amount, \"EUR\"), headers)",
+      "failure_scenario": "1. payment-service is slow, which the code comment says happens under load and which the timeout-less PSP RestTemplate makes likely (RS-001). Or a payment-service pod is killed mid-request during that team's own deploy (OP-001). 2. order-service's Feign call hits its read timeout or a connection reset. Feign turns the IOException into a RetryableException and re-POSTs /payments with the same orderId, up to 4 more times, whatever the HTTP method. 3. Each attempt inserts a new Payment row with a fresh UUID and calls PSP /v1/captures again, while the original request is often still running and completes its own capture. 4. The customer is charged 2 to 5 times. order-service stores only the last paymentId, and nothing finds or refunds the others. The retries also multiply load on a payment-service that is already slow, with backoff but no jitter and no circuit breaker (RS-002).",
+      "recommendation": "Stop retrying a call that is not idempotent: configure PaymentClient with Retryer.NEVER_RETRY now. Then make the charge idempotent end to end. order-service sends an Idempotency-Key (the orderId, or a payment-attempt id it persists). payment-service adds a unique constraint on payment(order_id) or on the key column, and returns the existing Payment when the key repeats. payment-service passes the same key to the PSP's idempotency mechanism, so its own retries cannot double-capture either. After that, a single retry layer with capped exponential backoff and jitter is safe.",
+      "pattern": "idempotency-key",
+      "applies_when": "The call moves real money. A retryer is already configured because payment-service is known to be slow. payment-service runs 2 replicas that its team redeploys on its own schedule, so timeouts and connection resets on this call are routine.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-002",
+      "lens": "data-consistency",
+      "title": "OrderPaidEvent is sent inside the open order transaction with no outbox, so stock decrements are silently skipped or lost",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 47
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 29
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 37
+        },
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 14
+        }
+      ],
+      "evidence": "// OrderService.placeOrder, @Transactional, before commit; the returned future is ignored\nkafkaTemplate.send(ORDER_EVENTS, new OrderPaidEvent(order.getId(), customerId, order.getTotal(), Instant.now()));\n\n// OrderEventsListener.onOrderPaid: reads order-service's table, and zero rows counts as success\nfor (OrderLine line : orderLines.findByOrderId(event.orderId())) { ... }\nlog.info(\"Stock decremented for order {}\", event.orderId());",
+      "failure_scenario": "(1) Race under normal load. The record reaches the broker within milliseconds while placeOrder's transaction is still open. An idle inventory consumer reads it and runs findByOrderId under READ COMMITTED before order-service commits. It sees zero order_items, loops zero times, logs 'Stock decremented' and moves on. That paid order never reduces stock. (2) The order transaction rolls back after the send (commit failure, pod kill). Inventory gets an event for an order that does not exist, and again does nothing silently. (3) The commit succeeds but the async send fails (broker unavailable, delivery.timeout.ms). Nobody reads the future, so the event is gone and stock drifts upward. (4) When Kafka is down, send() blocks for up to max.block.ms (60 s by default) on the request thread. The customer has already been charged and the thread is still holding a DB connection, so checkout stalls.",
+      "recommendation": "Use a transactional outbox. In the same local transaction that marks the order PAID, insert the event into an `outbox` table. A relay publishes it, keyed by orderId, and marks the row sent. The relay can be a poller guarded by ShedLock, since there are 2 replicas, or Debezium. Put the line items (sku, quantity) in the event so inventory-service never reads order-service's tables (SB-001). Make the listener reject an event with no lines rather than log success. Consumers then need to be idempotent (DC-007). An AFTER_COMMIT listener that checks the send future is an acceptable stopgap, but it still loses the event if the pod dies between commit and publish.",
+      "pattern": "transactional-outbox",
+      "applies_when": "inventory-service's stock correctness depends entirely on this event, and today the consumer reads rows the producer has not committed yet.",
+      "effort": "medium"
+    },
+    {
+      "id": "DC-005",
+      "lens": "data-consistency",
+      "title": "No saga or compensation: stock is checked only after the card is charged, and a failure leaves the customer charged for nothing",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 31
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 33
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/domain/Order.java",
+          "line": 22
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 44
+        }
+      ],
+      "evidence": "// OrderEventsListener (runs after the customer was charged)\n.orElseThrow(() -> new IllegalStateException(\"Unknown SKU \" + line.getSku()));\nif (item.getAvailable() < line.getQuantity()) {\n    throw new InsufficientStockException(line.getSku(), event.orderId());\n}\n\n// Order.java: CANCELLED exists but nothing ever sets it; payment-service has no refund endpoint\npublic enum Status { PENDING, PAID, CANCELLED }",
+      "failure_scenario": "A customer orders the last unit of a SKU that another paid order has just taken, or a SKU unknown to inventory. order-service charges the card and returns 201 PAID. The listener throws InsufficientStockException, and Spring Kafka's default error handler retries it 9 times with no backoff, then logs and skips it (MQ-002). The order stays PAID, the money stays captured, and no stock is allocated. Neither order-service nor payment-service is told. Nothing records how far the flow got, so recovery means someone reading logs and issuing refunds by hand.",
+      "recommendation": "Model checkout as a saga that order-service orchestrates, using the Order status column it already has as the saga state (PENDING, STOCK_RESERVED, PAID, CANCELLED). 1. Reserve stock first (reservation-pattern: a reservation row with an expiry, through a command or a synchronous call). 2. Charge with an idempotency key (DC-001). 3. Confirm the reservation. If a later step fails, compensate by releasing the reservation, refunding through a new payment-service refund endpoint, and marking the order CANCELLED. Every step goes through the outbox (DC-002) and idempotent handlers (DC-007). If a full orchestrator is too much for now, a minimal choreography still closes the money gap: inventory publishes StockReservationFailed, and order-service cancels and refunds on it.",
+      "pattern": "saga-orchestration",
+      "applies_when": "The flow spans three services with separate databases and owners, and it includes an irreversible external charge. A local transaction cannot cover it.",
+      "effort": "large"
+    },
+    {
+      "id": "MQ-001",
+      "lens": "messaging",
+      "title": "Kafka type headers carry order-service's Java class name, which inventory-service does not have",
+      "severity": "critical",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 16
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/events/OrderPaidEvent.java",
+          "line": 6
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 19
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 22
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderPaidEvent.java",
+          "line": 6
+        }
+      ],
+      "evidence": "# order-service application.yml (no spring.json.add.type.headers: false)\nvalue-serializer: org.springframework.kafka.support.serializer.JsonSerializer\n# event class: com.example.platform.order.events.OrderPaidEvent\n\n# inventory-service application.yml (no spring.json.use.type.headers: false, no type mapping, no ErrorHandlingDeserializer)\nvalue-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer\nspring.json.trusted.packages: \"*\"\nspring.json.value.default.type: com.example.platform.inventory.messaging.OrderPaidEvent",
+      "failure_scenario": "By default JsonSerializer stamps each record with the header `__TypeId__=com.example.platform.order.events.OrderPaidEvent`. JsonDeserializer gives that header precedence, and `value.default.type` is only a fallback when no header is present. inventory-service tries to load a class that is not on its classpath, so deserialization fails inside poll(), before the listener runs. No ErrorHandlingDeserializer is configured, so the failure never reaches a recoverer. The partition either stalls or the record is skipped, depending on the container's handling, and stock is not decremented for paid orders. If production has quietly overridden this, the next rename or move of the event class by the Checkout team breaks the Warehouse team's consumer in the middle of a rollout, and records already in the topic become unreadable.",
+      "recommendation": "Make the wire contract independent of Java class names. Set `spring.json.add.type.headers: false` on the producer, or `spring.json.use.type.headers: false` on the consumer, or map a logical id on both sides (`spring.json.type.mapping: orderPaid:<class>`). Wrap the consumer's deserializer in ErrorHandlingDeserializer so bad payloads reach the error handler and DLT (MQ-002). Add an explicit `eventType`/`version` field with tolerant readers. Add a contract test that pushes order-service's serialized payload through inventory-service's deserializer in both pipelines. If production is working today, find the override that makes it work and commit it to the repo.",
+      "pattern": "event-versioning",
+      "applies_when": "Producer and consumer belong to different teams, deploy independently and keep separate copies of the event class in different packages.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-003",
+      "lens": "data-consistency",
+      "title": "The order transaction stays open across the payment call, so a failed commit after capture leaves a charge with no order",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 38
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 44
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 53
+        }
+      ],
+      "evidence": "@Transactional\npublic Order placeOrder(String customerId, List<Line> lines) {\n    ...\n    orders.save(order);\n    ChargeResponse payment = takePayment(order);   // -> paymentClient.charge(...) over Feign\n    order.markPaid(payment.paymentId());\n    kafkaTemplate.send(ORDER_EVENTS, ...);\n    ...\n}",
+      "failure_scenario": "payment-service captures at the PSP, commits Payment(CAPTURED) and returns. Then order-service's transaction fails to commit: the pod is killed during a deploy, the commit fails after a long-held connection, or kafkaTemplate.send throws synchronously. orders and order_items roll back, so the customer is charged and order-service has no record of the order. The two sides also wait for different lengths of time. order-service gives up after 60 s per attempt (the Feign default), while payment-service waits on the PSP indefinitely. When the PSP is slow, order-service exhausts its retries and rolls back the order, and payment-service later commits CAPTURED. The client sees a 5xx and retries, which charges a second time for a new order.",
+      "recommendation": "Move the call outside the transaction. Transaction 1 inserts the order as PENDING and commits. Then call payment-service outside any transaction, using the idempotency key from DC-001. Transaction 2 marks the order PAID and writes the outbox row (DC-002). A reconciler finds orders stuck in PENDING and resolves them by asking payment-service for the payment by orderId; this is safe only once DC-001 is in place. Make order-service's Feign read timeout longer than payment-service's own PSP timeout (RS-001) so the caller never gives up before the callee.",
+      "pattern": "move-call-outside-transaction",
+      "applies_when": "The remote step moves money, and order-service runs 2 replicas that its team redeploys independently, so pods dying mid-request is routine.",
+      "effort": "medium"
+    },
+    {
+      "id": "DC-004",
+      "lens": "data-consistency",
+      "title": "payment-service captures at the PSP inside its DB transaction, so a rollback after capture erases the only record of the charge",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/service/PaymentService.java",
+          "line": 22
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/service/PaymentService.java",
+          "line": 25
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/psp/PspClient.java",
+          "line": 34
+        }
+      ],
+      "evidence": "@Transactional\npublic Payment charge(Long orderId, String customerId, BigDecimal amount) {\n    Payment payment = payments.save(new Payment(orderId, customerId, amount));\n    PspClient.CaptureResponse response = psp.capture(customerId, amount);\n    if (!\"approved\".equals(response.outcome())) {\n        throw new PaymentDeclinedException(orderId);\n    }\n    payment.captured(response.reference());\n    return payment;\n}",
+      "failure_scenario": "The PSP approves and captures. Then something throws before the commit: the pod is killed, the commit fails, or the PSP response is lost or unparseable after the capture. The INITIATED Payment row rolls back, so money has been captured at the PSP with no local row and no pspReference, and there is nothing to reconcile or refund against. Declined attempts are never stored either: the exception rolls the row back, and Status.FAILED is never written. That leaves no audit trail of payment attempts.",
+      "recommendation": "Move the call outside the transaction. Commit Payment(INITIATED, idempotencyKey) in its own short transaction. Call the PSP outside any transaction, with the idempotency key and timeouts (RS-001). Record CAPTURED or FAILED in a second short transaction. A reconciler asks the PSP, by idempotency key, about payments stuck in INITIATED. Use `TransactionTemplate` or a separate bean so the two transactions are not self-invoked.",
+      "pattern": "move-call-outside-transaction",
+      "applies_when": "A PSP capture cannot be undone without an explicit refund, and payment-service is redeployed on its own schedule.",
+      "effort": "medium"
+    },
+    {
+      "id": "DC-006",
+      "lens": "data-consistency",
+      "title": "The stock decrement is an unlocked check-then-write, so concurrent consumers lose updates and oversell",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 30
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 35
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/domain/StockItem.java",
+          "line": 14
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 24
+        }
+      ],
+      "evidence": "StockItem item = stock.findById(line.getSku()).orElseThrow(...);\nif (item.getAvailable() < line.getQuantity()) { throw ... }\nitem.setAvailable(item.getAvailable() - line.getQuantity());\n\n// StockItem: no @Version; StockRepository: no @Lock, no conditional UPDATE\nlistener:\n  concurrency: 3     # x 2 replicas; events sent with no key",
+      "failure_scenario": "Two paid orders for the same popular SKU land on different partitions and are consumed at the same moment by different threads or replicas. Both read available=10 and both pass the check. Hibernate writes the absolute values `available=8` and `available=7`, and under READ COMMITTED the second overwrites the first. One decrement is lost, stock is overstated, and the next orders oversell. With available=4 and two orders of 3, both pass the check and six units are sold against four. This is latent while order-events has one partition, which is the local default, but `concurrency: 3` on 2 replicas shows that parallel consumption is intended (SC-001). The production partition count is not in the repo, so confidence is medium.",
+      "recommendation": "Replace the read-modify-write with an atomic conditional update, which locks the row for the length of the statement: `UPDATE stock_items SET available = available - :qty WHERE sku = :sku AND available >= :qty`. Treat 0 rows updated as insufficient stock. Add a `CHECK (available >= 0)` constraint. Alternatives are `@Lock(PESSIMISTIC_WRITE)` on the lookup, or `@Version` with a retry for low-contention SKUs. Keying events by orderId does not fix this, because the contended aggregate is the SKU. Fix this before raising the partition count.",
+      "pattern": "pessimistic-locking",
+      "applies_when": "Concurrent orders share stock_items rows, and the consumer is configured for parallel consumption across 2 replicas.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-007",
+      "lens": "data-consistency",
+      "title": "The stock consumer is not idempotent, so a redelivery after a rebalance or crash decrements stock twice",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 35
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 16
+        }
+      ],
+      "evidence": "item.setAvailable(item.getAvailable() - line.getQuantity());   // relative effect, no processed-event check\n\nconsumer:\n  enable-auto-commit: true   # offsets committed on a timer, independent of the DB transaction",
+      "failure_scenario": "inventory-service commits the stock transaction for order 42. Before the next auto-commit interval (5 s by default) it is restarted, OOM-killed or rebalanced. Rebalances are routine with 6 consumer threads and three teams deploying on their own schedules. The new partition owner resumes from the last committed offset and processes order 42 again, so each SKU is decremented twice. Stock drifts below reality, and later orders fail as insufficient stock.",
+      "recommendation": "Use an idempotent consumer. Add `processed_order_events(order_id PRIMARY KEY)`, or a unique key on (order_id, sku) in a stock-movement table. Insert into it in the same transaction as the decrement, and skip the decrement on a duplicate. Switch to container-managed acks (MQ-003) so the offset commit follows processing.",
+      "pattern": "idempotent-consumer",
+      "applies_when": "Kafka delivers at least once, and a relative stock decrement is not naturally idempotent.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-001",
+      "lens": "resilience",
+      "title": "The PSP and payment-service calls have no timeouts and run while holding DB connections, so a slow PSP takes down checkout",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/config/HttpClientConfig.java",
+          "line": 12
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/psp/PspClient.java",
+          "line": 34
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/service/PaymentService.java",
+          "line": 22
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/client/PaymentClient.java",
+          "line": 9
+        },
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 18
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 38
+        }
+      ],
+      "evidence": "// HttpClientConfig: SimpleClientHttpRequestFactory, no connect/read timeout (waits forever)\nreturn new RestTemplate();\n\n# order-service application.yml: no spring.cloud.openfeign.client.config.* -> Feign defaults 10 s connect / 60 s read\nclients:\n  payment-service:\n    url: ${PAYMENT_SERVICE_URL:http://localhost:8081}\n\n# no spring.datasource.hikari.* anywhere -> pool of 10 per instance",
+      "failure_scenario": "The PSP brownouts: it accepts connections but stops answering. Each payment-service request waits on the socket indefinitely while holding one of its 10 Hikari connections. By Little's law, each order-service replica (about 2.5 orders/s at today's peak, about 7.5/s next year) runs out of its 10 connections once the end-to-end payment latency passes about 4 s today, or about 1.3 s next year. After that, new checkouts wait 30 s for a connection and fail. Each Feign attempt waits up to 60 s and is retried 5 times. GET /orders/{id}, which uses the same pool, fails too. The threads stuck on the PSP never free up, so checkout stays down after the PSP recovers, until the pods are restarted. Adding replicas does not help, because every pod blocks on the same PSP.",
+      "recommendation": "Set timeouts on every client. PSP: build the RestTemplate with RestTemplateBuilder, setConnectTimeout(1 s) and setReadTimeout at the PSP's p99 plus headroom (for example 5 s), on a pooled HTTP client. Feign: `spring.cloud.openfeign.client.config.payment-service.connect-timeout: 1000` and a `read-timeout` longer than payment-service's PSP timeout plus its DB time (for example 8000). Kafka producer: `max.block.ms` and `delivery.timeout.ms` of a few seconds (or the outbox, DC-002). Then stop holding connections across the calls (DC-003, DC-004), and size Hikari explicitly with a shorter `connection-timeout` (PS-003).",
+      "pattern": "timeouts",
+      "applies_when": "These are network calls on the only revenue flow, made while holding a DB connection, and one of them goes to a third party whose latency the team does not control.",
+      "effort": "small"
+    },
+    {
+      "id": "SB-001",
+      "lens": "service-boundaries",
+      "title": "inventory-service reads order-service's order_items table from the shared `shop` database",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/domain/OrderLine.java",
+          "line": 14
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 29
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 5
+        },
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 5
+        },
+        {
+          "file": "docker-compose.yml",
+          "line": 37
+        }
+      ],
+      "evidence": "// inventory-service OrderLine.java\n@Entity @Immutable @Table(name = \"order_items\")\npublic class OrderLine { @Id private Long id; @Column(name = \"order_id\") private Long orderId; private String sku; private int quantity; }\n\n# both services\nurl: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/shop}\n\nREADME: \"Each team deploys on its own schedule.\"",
+      "failure_scenario": "The Checkout team refactors order_items on its own schedule, for example renaming `quantity`, splitting out variants, or moving lines into a JSON column. order-service's ddl-auto applies the change, and nothing in inventory-service's build fails. After the deploy, every OrderPaidEvent either makes `findByOrderId` throw, or reads a stale column that is no longer written and decrements the wrong amount. Stock stops moving or drifts. Nobody owns the invariants of order_items: the Warehouse team depends on a table it cannot see change, and Checkout does not know it has a consumer. Because of this coupling, the event carries no lines, which causes the uncommitted-read race in DC-002.",
+      "recommendation": "Use database-per-service, with the data replicated through events. Add the lines (sku, quantity) and an event version to OrderPaidEvent, and have inventory build its decrement from the event alone. Then delete OrderLine and OrderLineRepository, and give inventory-service its own schema or database with credentials that cannot read `shop.order_items` (see OP-002). Keep the contract stable with a consumer-driven contract test owned by the Warehouse team and run in order-service's build.",
+      "pattern": "database-per-service",
+      "applies_when": "Two teams own order-service and inventory-service and deploy them independently. The README says so outright.",
+      "effort": "medium"
+    },
+    {
+      "id": "PS-001",
+      "lens": "persistence",
+      "title": "Schema is managed by ddl-auto=update in every service, and two services both run DDL against order_items",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 10
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 10
+        },
+        {
+          "file": "payment-service/src/main/resources/application.yml",
+          "line": 10
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/domain/OrderLine.java",
+          "line": 17
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/domain/OrderItem.java",
+          "line": 18
+        }
+      ],
+      "evidence": "# all three application.yml; no Flyway or Liquibase dependency or migration files\njpa:\n  hibernate:\n    ddl-auto: update\n\n// order-service OrderItem (table order_items)\n@Id @GeneratedValue(strategy = GenerationType.IDENTITY) private Long id;\n// inventory-service OrderLine (same table; @Immutable does not exclude it from schema update)\n@Id private Long id;",
+      "failure_scenario": "(a) Fresh database: a new environment, a DR rebuild, a CI run, or `docker compose up` on an empty volume. Compose does not order the two services, so inventory-service can start first. Its Hibernate creates order_items with `id bigint not null` and no identity. order-service's update then only adds `unit_price` and never changes `id`. Every order insert leaves out the id, hits the NOT NULL constraint, and checkout is down until someone repairs the table by hand. (b) Rolling deploys: `update` never drops or renames anything, so a renamed field leaves the old NOT NULL column behind and inserts fail. Nothing reviews or orders schema changes across the two teams. (c) Two replicas starting together both run DDL on the same schema, which can fail one of them at startup.",
+      "recommendation": "Use versioned migrations: Flyway or Liquibase per service, owned by the service that owns the table, with `ddl-auto: validate` everywhere. Today set inventory-service to `none` so it never touches order_items. Use expand-contract for renames and drops (add a nullable column, deploy the readers, backfill, then drop), so that old and new versions can run side by side during rolling deploys.",
+      "pattern": "versioned-migrations",
+      "applies_when": "A production system with 2 replicas per service, three teams deploying independently, and a table shared by two of them.",
+      "effort": "medium"
+    },
+    {
+      "id": "MQ-002",
+      "lens": "messaging",
+      "title": "No retry backoff or dead-letter topic: a failing order event is retried within milliseconds, then dropped",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 26
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 31
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 33
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 12
+        }
+      ],
+      "evidence": "@KafkaListener(topics = \"order-events\")\n...orElseThrow(() -> new IllegalStateException(\"Unknown SKU \" + line.getSku()));\nthrow new InsufficientStockException(line.getSku(), event.orderId());\n\n// No CommonErrorHandler / DefaultErrorHandler bean, no DeadLetterPublishingRecoverer, no @RetryableTopic,\n// no ErrorHandlingDeserializer -> Spring Kafka default: FixedBackOff(0, 9), then log and skip",
+      "failure_scenario": "There are two cases. Transient failure: Postgres fails over or a lock wait times out. The 10 immediate attempts are used up within milliseconds, the record is logged and skipped, and auto-commit moves the offset past it. The decrement is lost for good. Business failure: an unknown SKU or insufficient stock is retried pointlessly, then dropped with only an ERROR log line, with no replay and no signal to order-service (DC-005). Either way, stock drifts and nobody can tell which orders were affected.",
+      "recommendation": "Configure a DefaultErrorHandler with exponential backoff for transient exceptions. Mark business exceptions (InsufficientStockException, unknown SKU) as not retryable. Route exhausted or non-retryable records through DeadLetterPublishingRecoverer to `order-events.DLT`, or use @RetryableTopic with a retry topic and then the DLT. Alert on DLT depth (OP-005) and provide a replay tool. A stock shortfall should eventually produce a compensating event (DC-005), not only a DLT entry.",
+      "pattern": "dead-letter-queue",
+      "applies_when": "The consumer handles events that customers have already paid for, and it can fail both transiently and permanently.",
+      "effort": "medium"
+    },
+    {
+      "id": "OP-001",
+      "lens": "operability",
+      "title": "Immediate shutdown (the Boot 3.3 default) cuts in-flight order and payment requests on every deploy",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "payment-service/src/main/resources/application.yml",
+          "line": 1
+        },
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 1
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 1
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/service/PaymentService.java",
+          "line": 22
+        }
+      ],
+      "evidence": "# no server.shutdown and no spring.lifecycle.timeout-per-shutdown-phase in any application.yml\n# parent: spring-boot-starter-parent 3.3.4 (graceful shutdown became the default only in 3.4)\nREADME: \"Production runs 2 replicas of each service on k8s\" / \"Each team deploys on its own schedule.\"",
+      "failure_scenario": "The Payments team rolls payment-service. A pod receives SIGTERM while a request sits between the PSP capture and the commit. With immediate shutdown, the web server and the DataSource are torn down, so the capture stands and the payment row rolls back (DC-004). order-service sees a connection reset and its Feign retryer resends to the other replica, which captures again (DC-001). inventory-service consumers are also cut mid-batch at every rollout, which feeds the redelivery in DC-007. Without a preStop delay, pods can still receive new requests after SIGTERM.",
+      "recommendation": "Set `server.shutdown: graceful` and `spring.lifecycle.timeout-per-shutdown-phase: 20s` in all three services. In the k8s manifests (not in the repo), add a preStop sleep so readiness flips before the drain, and set `terminationGracePeriodSeconds` above the shutdown phase. Graceful shutdown only shrinks the window. The double-charge and lost-record fixes are DC-001 and DC-004.",
+      "pattern": "graceful-shutdown",
+      "applies_when": "Each service runs 2 replicas with rolling deploys, and three teams deploy on independent schedules.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-002",
+      "lens": "operability",
+      "title": "Database superuser credentials are committed in source and shared by all three services",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 6
+        },
+        {
+          "file": "payment-service/src/main/resources/application.yml",
+          "line": 6
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 6
+        },
+        {
+          "file": "docker-compose.yml",
+          "line": 5
+        }
+      ],
+      "evidence": "# all three application.yml, literals with no ${...} placeholder\nusername: platform\npassword: platform\n\n# docker-compose.yml: this is the image's superuser\nPOSTGRES_USER: platform\nPOSTGRES_PASSWORD: platform\n\n# by contrast, payment-service does this correctly:\napi-key: ${PSP_API_KEY}",
+      "failure_scenario": "The password is in git history for every clone. Rotating it takes a commit and a redeploy coordinated across three teams, unless every environment overrides SPRING_DATASOURCE_PASSWORD, and nothing in the repo shows that it does. All services use one superuser across both databases. A bug, a leaked credential or a compromised order or inventory pod can therefore read or modify the `payments` database, so no database permission backs the service boundaries (SB-001).",
+      "recommendation": "Use externalized config and a secrets manager. Change the config to `username: ${DB_USERNAME}` and `password: ${DB_PASSWORD}` with no default, and inject them from k8s Secrets or Vault. Give each service its own least-privilege role that can reach only its own database or tables. Keep the compose defaults in a local profile or a `.env` file. Hand this to a dedicated security review for depth.",
+      "pattern": "secrets-manager",
+      "applies_when": "Secrets always qualify. Here one credential is shared by three services owned by three teams.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-008",
+      "lens": "data-consistency",
+      "title": "POST /orders has no idempotency key, so a client or gateway retry of a slow checkout creates a second order and charge",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/api/OrderController.java",
+          "line": 39
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 39
+        }
+      ],
+      "evidence": "@PostMapping\npublic ResponseEntity<OrderView> place(@RequestBody PlaceOrderRequest request)\n// PlaceOrderRequest(String customerId, List<Line> lines): no client reference, no unique business key on orders",
+      "failure_scenario": "Checkout is slow because payment-service is slow, and placeOrder can run for minutes (RS-001). The gateway or the client times out and retries, or the user clicks again. The first request still finishes, charges and commits, and the retry creates a second order with a second charge. The gateway's retry policy is not in the repo, which is why confidence is medium.",
+      "recommendation": "Accept an Idempotency-Key header (or a client-generated order reference) and store it on orders with a unique constraint. On a repeat, return the existing order and its status. Reuse the same key downstream as the payment idempotency key from DC-001.",
+      "pattern": "idempotency-key",
+      "applies_when": "Placing an order triggers a real-money charge, behind a gateway and clients that may retry.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-002",
+      "lens": "resilience",
+      "title": "No circuit breaker around payment-service or the PSP",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/client/PaymentClient.java",
+          "line": 9
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/psp/PspClient.java",
+          "line": 31
+        },
+        {
+          "file": "order-service/pom.xml",
+          "line": 45
+        }
+      ],
+      "evidence": "// no resilience4j / spring-cloud-starter-circuitbreaker in any pom; no @CircuitBreaker,\n// no spring.cloud.openfeign.circuitbreaker.enabled, no mesh manifests\n@FeignClient(name = \"payment-service\", url = \"${clients.payment-service.url}\")",
+      "failure_scenario": "During a PSP or payment-service outage, every checkout (about 5/s now, about 15/s planned) still makes the full call: up to 5 Feign attempts, and on the payment side a wait on the PSP. Threads and connections are tied up by calls that are certain to fail, retries keep load on payment-service while it tries to recover, and customers wait minutes for an error instead of failing fast.",
+      "recommendation": "Wrap PaymentClient (`spring.cloud.openfeign.circuitbreaker.enabled=true` with Resilience4j) and PspClient in circuit breakers. Fail fast with a clear 'payment temporarily unavailable' response, or, once DC-005 is in place, accept the order as PENDING_PAYMENT and charge it later. Do timeouts (RS-001) and idempotency (DC-001) first; the breaker builds on them.",
+      "pattern": "circuit-breaker",
+      "applies_when": "Every checkout calls two independently failing dependencies synchronously, one of them external, at meaningful volume.",
+      "effort": "small"
+    },
+    {
+      "id": "MQ-003",
+      "lens": "messaging",
+      "title": "Kafka auto-commit separates offset commits from the outcome of processing",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 16
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 27
+        }
+      ],
+      "evidence": "consumer:\n  group-id: inventory-service\n  enable-auto-commit: true",
+      "failure_scenario": "With auto-commit, the Kafka client commits its position on a timer during poll(), and the Spring container cannot hold an offset back based on the outcome. Processing runs on the listener thread today, so a crash mostly means redelivery (DC-007). But a record the error handler skips is committed with no trace of the failure. If anyone later moves the work off the listener thread (@Async or an executor), offsets will be committed before the DB transaction, and a crash will lose decrements silently.",
+      "recommendation": "Commit only after processing. Set `enable-auto-commit: false`, which is Spring Kafka's own default when unset, and use the container's AckMode.RECORD or BATCH. Offsets are then committed only after the listener's transaction commits, or after the DLT publish succeeds (MQ-002). Pair this with the idempotent consumer (DC-007).",
+      "pattern": "manual-ack-after-processing",
+      "applies_when": "Losing an order-paid event leaves stock wrong for an order the customer paid for.",
+      "effort": "small"
+    },
+    {
+      "id": "SC-001",
+      "lens": "scalability",
+      "title": "order-events is never declared: with one partition, one consumer serves the whole fleet despite concurrency 3 on 2 replicas",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 24
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 47
+        },
+        {
+          "file": "docker-compose.yml",
+          "line": 11
+        }
+      ],
+      "evidence": "listener:\n  concurrency: 3      # inventory-service, 2 replicas\n\n// no NewTopic bean or topic config anywhere; bitnami/kafka:3.7 with no KAFKA_CFG_NUM_PARTITIONS\nkafkaTemplate.send(ORDER_EVENTS, new OrderPaidEvent(...));   // no key",
+      "failure_scenario": "The topic is created automatically on the first send, using the broker defaults: 1 partition, and a replication factor of 1 in this compose. Of the 6 consumer threads, exactly one receives records, so adding replicas adds no throughput, and every team's independent deploy pauses consumption with a rebalance. With a replication factor of 1, losing that broker loses paid-order events that have not been consumed yet. Because production behaviour comes from broker defaults rather than code, it can differ silently between environments.",
+      "recommendation": "Declare the topic in code (a NewTopic bean or the platform's topic-as-code) with explicit partitions (for example 6 to 12), replication factor 3 and `min.insync.replicas=2`. Key records by orderId. Make the stock update safe under concurrency (DC-006) before raising the partition count.",
+      "pattern": "partitioning",
+      "applies_when": "Parallel consumption is clearly intended (2 replicas x concurrency 3), and load is expected to triple.",
+      "effort": "small"
+    },
+    {
+      "id": "PS-002",
+      "lens": "persistence",
+      "title": "order_items.order_id has no index but is queried on every order-paid event",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/domain/OrderLineRepository.java",
+          "line": 9
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/domain/OrderItem.java",
+          "line": 21
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 29
+        }
+      ],
+      "evidence": "List<OrderLine> findByOrderId(Long orderId);\n\n// OrderItem: @ManyToOne @JoinColumn(name = \"order_id\") with no @Table(indexes = ...);\n// schema from ddl-auto only -> PostgreSQL gets the FK constraint but no index",
+      "failure_scenario": "At a peak of 300 orders per minute, tripling next year, order_items gains hundreds of thousands of rows a day and is never pruned. Every OrderPaidEvent runs `SELECT ... WHERE order_id = ?` as a sequential scan. Within months each event costs a full table scan on the Postgres instance that also serves checkout. With a single active consumer (SC-001), throughput falls below the arrival rate and consumer lag grows without bound.",
+      "recommendation": "Add an index: `CREATE INDEX CONCURRENTLY idx_order_items_order_id ON order_items(order_id)`, in a migration owned by order-service (PS-001). The query disappears altogether once the event carries its lines (SB-001), so this is the stopgap if SB-001 is not done soon.",
+      "pattern": "add-index",
+      "applies_when": "order_items grows with every order line, and every paid order runs this lookup.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-003",
+      "lens": "operability",
+      "title": "Readiness ignores the DB and Kafka, and the probe wiring is not in the repo",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "order-service/pom.xml",
+          "line": 41
+        },
+        {
+          "file": "payment-service/pom.xml",
+          "line": 41
+        },
+        {
+          "file": "inventory-service/pom.xml",
+          "line": 41
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 12
+        }
+      ],
+      "evidence": "<artifactId>spring-boot-starter-actuator</artifactId>   <!-- all three poms -->\n# no management.* keys in any application.yml; no k8s manifests in the repo",
+      "failure_scenario": "On k8s, Boot enables `/actuator/health/readiness` automatically, but by default it reflects only readinessState. A pod whose DB pool is exhausted (RS-001) stays Ready and keeps receiving checkout traffic that then fails. inventory-service has no Kafka health signal, so a consumer that is stuck or cannot deserialize (MQ-001) looks healthy while stock stops moving. If the unseen manifests point liveness at `/actuator/health`, which includes `db`, a Postgres blip fails liveness on all 6 pods at once and causes a restart storm.",
+      "recommendation": "Set `management.endpoint.health.probes.enabled=true`. Keep liveness on livenessState only. Add `db` to `management.endpoint.health.group.readiness.include`. For inventory-service, expose listener-container state or consumer lag as a health or metric signal. Commit the k8s probe definitions next to the services, or document where they live.",
+      "pattern": "health-probes",
+      "applies_when": "Each service runs 2 replicas behind a load balancer on k8s.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-004",
+      "lens": "operability",
+      "title": "No distributed tracing or correlation id across order, payment and inventory",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "order-service/pom.xml",
+          "line": 30
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/service/OrderService.java",
+          "line": 47
+        },
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/service/PaymentService.java",
+          "line": 23
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 37
+        }
+      ],
+      "evidence": "// no micrometer-tracing / OpenTelemetry dependency in any pom\nkafkaTemplate.send(ORDER_EVENTS, new OrderPaidEvent(...));   // no key, no headers\n// payment-service has no logger at all; default plain-text Logback everywhere",
+      "failure_scenario": "A customer reports 'charged twice', 'charged but no order' or 'paid but stock not reduced'. The flow crosses 6 pods and an external PSP. payment-service logs nothing, and nothing links a Feign retry attempt to a PSP capture or to a Kafka record. On-call has to grep pods by timestamp and order id, and still cannot tell which of five attempts produced which capture (DC-001).",
+      "recommendation": "Add `micrometer-tracing-bridge-otel` (or Brave) with an exporter in all three services. Build the RestTemplate from RestTemplateBuilder so it is instrumented, and enable observation on KafkaTemplate and the listener container so trace context propagates through Kafka headers. Put the trace id and orderId in the MDC, and move to structured JSON logs. Log every capture request and its outcome in payment-service, with orderId, paymentId and pspReference.",
+      "pattern": "distributed-tracing",
+      "applies_when": "Every order flow spans three deployables plus an external PSP, owned by three teams.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-005",
+      "lens": "operability",
+      "title": "No metrics or alerts on checkout, payment, consumer lag or skipped stock decrements",
+      "severity": "medium",
+      "confidence": "high",
+      "locations": [
+        {
+          "file": "order-service/pom.xml",
+          "line": 41
+        },
+        {
+          "file": "payment-service/pom.xml",
+          "line": 41
+        },
+        {
+          "file": "inventory-service/pom.xml",
+          "line": 41
+        },
+        {
+          "file": "inventory-service/src/main/java/com/example/platform/inventory/messaging/OrderEventsListener.java",
+          "line": 31
+        }
+      ],
+      "evidence": "<artifactId>spring-boot-starter-actuator</artifactId>   <!-- but no micrometer-registry-*, no endpoint exposure -->\n# no management.endpoints.web.exposure.include, no lag exporter, no alert rules in the repo",
+      "failure_scenario": "inventory-service stops making progress, because of MQ-001, a stalled partition or skipped poison records (MQ-002). order-service keeps returning 201 and charging customers. Nothing reports consumer lag, skipped records, rising PSP latency, Feign retry storms or Hikari saturation. Stock drifts from reality until the warehouse or customers notice.",
+      "recommendation": "Add `micrometer-registry-prometheus` and expose `prometheus`. Alert on: RED metrics for POST /orders and /payments, PSP and Feign latency and errors, Kafka consumer lag for group inventory-service, listener failures and skips, DLT depth (once MQ-002 exists), and Hikari pool saturation. Add business counters (orders placed vs paid, payment declines, stock decrements failed) and a reconciliation gauge for paid orders not yet decremented.",
+      "pattern": "metrics-and-alerts",
+      "applies_when": "These production services handle money and stock at about 5 orders/s now and about 15/s next year.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-006",
+      "lens": "operability",
+      "title": "No auth boundary on any service, and the charge identity comes from the request body",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "payment-service/src/main/java/com/example/platform/payment/api/PaymentController.java",
+          "line": 28
+        },
+        {
+          "file": "order-service/src/main/java/com/example/platform/order/api/OrderController.java",
+          "line": 39
+        },
+        {
+          "file": "README.md",
+          "line": 3
+        }
+      ],
+      "evidence": "// no spring-security in any pom\npublic ChargeResponse charge(@RequestBody ChargeRequest request)   // customerId + amount straight to the PSP\npublic record PlaceOrderRequest(String customerId, List<OrderService.Line> lines)   // Line carries unitPrice\nREADME: \"Three Spring Boot services behind our gateway\"   // gateway config not in the repo",
+      "failure_scenario": "Anything that can reach payment-service on the network can capture any amount from any customer's stored payment method: another pod in the cluster, or the internet if the unseen gateway routes /payments. Through the public POST /orders, a caller can name another customer's customerId or set their own prices. The gateway cannot fix this, because identity and price come from the body, not from a token.",
+      "recommendation": "Commit or document the api-gateway or ingress routing so it can be reviewed, and keep payment-service off the public route. Require service-to-service authentication on /payments (mTLS or a service JWT). Derive customerId from the authenticated principal and prices from a catalog on the server. Hand this to a dedicated security review.",
+      "pattern": "api-gateway",
+      "applies_when": "External clients reach the system through a gateway, and one internal service can move money.",
+      "effort": "medium"
+    },
+    {
+      "id": "PS-003",
+      "lens": "persistence",
+      "title": "Default Hikari pools are not sized against the shared Postgres connection limit",
+      "severity": "low",
+      "confidence": "medium",
+      "locations": [
+        {
+          "file": "docker-compose.yml",
+          "line": 2
+        },
+        {
+          "file": "order-service/src/main/resources/application.yml",
+          "line": 4
+        },
+        {
+          "file": "payment-service/src/main/resources/application.yml",
+          "line": 4
+        },
+        {
+          "file": "inventory-service/src/main/resources/application.yml",
+          "line": 4
+        }
+      ],
+      "evidence": "# one postgres:16 service hosts both databases; no spring.datasource.hikari.* in any service\ndatasource:\n  url: ${SPRING_DATASOURCE_URL:...}",
+      "failure_scenario": "Today 3 services x 2 replicas x 10 connections = 60 of Postgres's default 100 max_connections. As load triples, or as one team responds to pool exhaustion (RS-001) by raising its pool size or replica count, the total passes 100, counting the surge pods during rolling deploys. New pods of any service then fail to connect, so one team's scaling decision breaks another team's service.",
+      "recommendation": "Size connection pools against the limit. Agree a connection budget per service, set `spring.datasource.hikari.maximum-pool-size` and a shorter `connection-timeout` explicitly, and leave headroom for the rolling-deploy surge. Add PgBouncer, or separate instances per team, if the services need to scale independently.",
+      "pattern": "connection-pool-sizing",
+      "applies_when": "Three teams scale and deploy independently against one Postgres instance. The production DB config is not in the repo.",
+      "effort": "small"
+    }
+  ],
+  "strengths": [
+    "spring.jpa.open-in-view is set to false in all three services, so lazy loads cannot hold connections through serialization.",
+    "payment-service has its own `payments` database, which is database-per-service done right for the money domain.",
+    "The PSP API key is externalized (`${PSP_API_KEY}`, no default), and service and broker URLs come from environment placeholders.",
+    "There is no shared domain library. Each service keeps its own copy of its contract records (OrderPaidEvent, ChargeRequest), and controllers return DTOs (OrderView, ChargeResponse), not JPA entities.",
+    "The PSP integration is wrapped in PspClient with its own request and response records, so PSP types do not leak into the domain.",
+    "The service split matches three teams with independent release schedules. This is not a premature split.",
+    "The services are stateless: no HTTP session state, no in-memory business maps, no local files, no local caches. Horizontal scaling needs no rework.",
+    "There is no XA, JTA or ChainedTransactionManager, and nobody pretends to have distributed atomicity.",
+    "Order already has a status column (PENDING, PAID, CANCELLED), the natural place to keep saga state (DC-005)."
+  ]
+}

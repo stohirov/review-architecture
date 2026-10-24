@@ -1,0 +1,19 @@
+04-design-brief: PASS
+  findings: 22
+  recall: 6/6 (100%)
+    + shared-database <- SB-001
+    + sync-payment-in-booking <- DC-001, DC-003, DC-004, DC-005, RS-001, RS-002, SC-003
+    + remote-calls-in-tx <- DC-001, DC-002, DC-003, DC-006
+    + location-write-hotspot <- SC-001, SC-002, PS-001, SC-003
+    + matching-in-memory-state <- SC-001
+    + trip-completed-dual-write <- DC-002, DC-003, DC-006, MQ-001
+  bonus: notification-on-critical-path, no-saga-booking, payment-consumer-idempotency
+  not in answer key (review by hand):
+    ? PS-002 [medium] No connection budget or pooler for eight autoscaled services on one Postgres primary
+    ? OP-001 [medium] Probe design is undecided, and a liveness check on the shared DB would restart all eight services together
+    ? OP-002 [medium] No distributed tracing across the synchronous booking chain or the Kafka completion flow
+    ? OP-003 [medium] No metrics, SLO alerting or consumer-lag alerts for the ride-request target or fare capture
+    ? MQ-002 [medium] The TripCompleted contract has no versioning, though three consumers owned by other squads read it
+    ? OP-004 [low] No graceful-shutdown plan for in-flight bookings and Kafka consumers during rolling deploys
+    ? OP-005 [low] No plan for config and secrets, and the shared schema implies one DB credential for all services
+    ? PS-003 [low] The rides table grows by one row per ride, with no partitioning, archival or active-ride index plan

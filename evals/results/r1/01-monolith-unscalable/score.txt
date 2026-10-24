@@ -1,0 +1,27 @@
+01-monolith-unscalable: PASS
+  findings: 26
+  recall: 9/9 (100%)
+    + session-state <- SC-001
+    + local-filesystem <- SC-002, SC-004
+    + scheduler-no-lock <- SC-004
+    + local-price-cache <- SC-003, SC-005
+    + unbounded-findall <- SC-005
+    + n-plus-one <- PS-002, PS-004
+    + sync-email <- DC-001, DC-003, RS-001
+    + open-in-view <- PS-004
+    + stock-lost-update <- DC-001, DC-002, DC-003
+  bonus: ddl-auto-update, invoice-job-long-tx
+  not in answer key (review by hand):
+    ? DC-005 [high] Checkout POST is not idempotent: a retry or double-submit creates a second order
+    ? PS-001 [high] Default Hikari pool times HPA maxReplicas (12 x 10 = 120) exceeds Postgres's default connection limit
+    ? OP-001 [high] Readiness probe includes SMTP health and there is no liveness probe: a mail outage pulls every pod out of service
+    ? OP-002 [high] HPA cannot scale on CPU utilization: the container has no CPU request, and CPU is the wrong signal for this I/O-bound app
+    ? OP-003 [high] No authentication boundary: price changes, image uploads and any customer's order history are open to anyone
+    ? RS-002 [medium] No JDBC socket or statement timeouts and a 30 s pool wait on the request path
+    ? OP-004 [medium] No graceful shutdown: every rolling deploy or HPA scale-in cuts in-flight requests
+    ? OP-005 [medium] No metrics registry or alerts: Black Friday saturation will be discovered by customers
+    ? OP-006 [medium] Default DB credential committed in config; the manifest wires no Secrets for DB or SMTP
+    ? SB-001 [medium] Order and media modules write catalog's Product directly; no module owns the stock invariant
+    ? OP-007 [low] No correlation id or structured logs; a failed checkout cannot be traced across 3-12 pods
+    ? SB-002 [low] Catalog endpoints return the Product JPA entity, exposing stock counts and internal file names
+    ? SB-003 [info] Do not split into microservices for Black Friday; the scaling blockers are per-pod state

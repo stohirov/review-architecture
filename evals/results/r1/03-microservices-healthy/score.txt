@@ -1,0 +1,30 @@
+03-microservices-healthy: FAIL
+  findings: 24
+  recall: 0/0 (100%)
+  control: above max severity: DC-001, MQ-001, SC-001, DC-002
+  control: recommends an existing pattern: DC-001, MQ-001, DC-003, DC-004, OP-001, OP-003, OP-004, RS-001, DC-005, OP-006
+  not in answer key (review by hand):
+    ? DC-001 [high] Saga watchdog can cancel an order that already reached STOCK_RESERVED: customer charged, order cancelled, stock never released
+    ? MQ-001 [high] ~15s retry budget dead-letters saga messages during ordinary PSP/DB outages, with no redrive, metric or alert
+    ? SC-001 [high] payment-commands consumer is sized for neither the planned 3x load nor a slow PSP (1 thread per pod, undeclared partitions, max.poll.records 500)
+    ? DC-002 [high] POST /orders accepts any line values: a negative quantity increases stock and lowers the charge; a duplicate SKU dead-letters the reservation
+    ? DC-003 [medium] Saga timeout cancels without ReleaseStock, so a dead-lettered StockReserved leaks inventory permanently
+    ? DC-004 [medium] Checked JsonProcessingException commits the inbox row, so a dead-lettered message is silently skipped when replayed
+    ? MQ-002 [medium] Wire type is the producer's Java class name, and two consumers ack-and-drop unknown types
+    ? SB-001 [medium] No anti-corruption mapping around the PSP: any outcome other than "approved" counts as a decline, and every exception is retried
+    ? SC-002 [medium] Outbox relay sends one record at a time with per-row merges, capping throughput around 100 events/s, and its 30s lock can expire mid-batch
+    ? PS-001 [medium] processed_messages inbox tables are never purged in any service
+    ? PS-002 [medium] Connection budget of 9 pods x 10 nearly fills one Postgres server's default max_connections
+    ? OP-001 [medium] Traces break at every Kafka hop (observation disabled, outbox drops trace context) and no code logs anything
+    ? OP-002 [medium] No outbox-backlog or saga-outcome metrics and no alert rules; one unpublishable outbox row silently stalls a whole service
+    ? OP-003 [medium] No startupProbe and migrations run at pod start: a slow start or a long index build crash-loops the rollout and blocks order writes
+    ? OP-004 [medium] Deployments declare no resource requests/limits, PodDisruptionBudget or spread constraints
+    ? OP-005 [medium] order-service has no authentication boundary and trusts customerId from the request
+    ? SC-003 [low] Stock rows are locked in request line order, so overlapping multi-line orders can deadlock
+    ? PS-003 [low] Daily outbox purge deletes a full day of rows in one unbounded DELETE
+    ? PS-004 [low] Polled GET /orders/{id} fetches order items the response never uses
+    ? RS-001 [low] No JDBC statement or lock timeout: a held stock row lock stalls the inventory consumer past max.poll.interval
+    ? DC-005 [low] Concurrent duplicate POST /orders returns 500 to the loser, and the idempotency key is not scoped to the customer
+    ? OP-006 [low] No preStop delay before graceful shutdown on order-service
+    ? OP-007 [low] docker-compose cannot start the services: required env vars are missing and there are no healthchecks
+    ? MQ-003 [info] README documents an OrderCreated event that is never published
