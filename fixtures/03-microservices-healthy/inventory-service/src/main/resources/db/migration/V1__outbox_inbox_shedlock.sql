@@ -14,6 +14,7 @@ create table processed_messages (
     message_id   varchar(64) primary key,
     processed_at timestamptz not null
 );
+create index processed_messages_at_idx on processed_messages (processed_at);
 
 create table shedlock (
     name       varchar(64)  primary key,

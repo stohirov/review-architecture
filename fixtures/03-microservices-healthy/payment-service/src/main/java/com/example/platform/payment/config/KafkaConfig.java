@@ -15,10 +15,11 @@ public class KafkaConfig {
      */
     @Bean
     public DefaultErrorHandler kafkaErrorHandler(KafkaTemplate<String, String> template) {
-        ExponentialBackOffWithMaxRetries backOff = new ExponentialBackOffWithMaxRetries(5);
-        backOff.setInitialInterval(500);
+        // ~3 minutes in total: longer than a circuit-breaker open window or a DB failover.
+        ExponentialBackOffWithMaxRetries backOff = new ExponentialBackOffWithMaxRetries(8);
+        backOff.setInitialInterval(1_000);
         backOff.setMultiplier(2.0);
-        backOff.setMaxInterval(10_000);
+        backOff.setMaxInterval(60_000);
         DefaultErrorHandler handler = new DefaultErrorHandler(new DeadLetterPublishingRecoverer(template), backOff);
         handler.addNotRetryableExceptions(com.fasterxml.jackson.core.JsonProcessingException.class);
         return handler;

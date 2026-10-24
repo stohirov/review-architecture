@@ -21,7 +21,7 @@ public class InventoryCommandListener {
     }
 
     @KafkaListener(topics = "inventory-commands")
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public void onCommand(ConsumerRecord<String, String> record) throws JsonProcessingException {
         if (!inbox.firstDelivery(Headers.messageId(record))) {
             return;

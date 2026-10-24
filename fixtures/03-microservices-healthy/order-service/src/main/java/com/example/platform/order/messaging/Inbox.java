@@ -1,6 +1,9 @@
 package com.example.platform.order.messaging;
 
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -12,9 +15,22 @@ import org.springframework.transaction.annotation.Transactional;
 public class Inbox {
 
     private final JdbcTemplate jdbc;
+    private final int retentionDays;
 
-    public Inbox(JdbcTemplate jdbc) {
+    public Inbox(JdbcTemplate jdbc, @Value("${outbox.retention-days}") int retentionDays) {
         this.jdbc = jdbc;
+        this.retentionDays = retentionDays;
+    }
+
+    /** Redeliveries happen within minutes; a week of ids is ample. Deleted in chunks to keep locks short. */
+    @Scheduled(cron = "0 45 3 * * *")
+    @SchedulerLock(name = "inbox-cleanup")
+    public void purgeOld() {
+        int deleted;
+        do {
+            deleted = jdbc.update("delete from processed_messages where message_id in (select message_id from processed_messages "
+                    + "where processed_at < now() - make_interval(days => ?) limit 5000)", retentionDays);
+        } while (deleted > 0);
     }
 
     @Transactional(propagation = Propagation.MANDATORY)

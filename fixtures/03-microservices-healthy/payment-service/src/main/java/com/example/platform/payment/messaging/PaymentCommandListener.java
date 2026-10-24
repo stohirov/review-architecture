@@ -27,7 +27,7 @@ public class PaymentCommandListener {
         this.json = json;
     }
 
-    @KafkaListener(topics = "payment-commands")
+    @KafkaListener(topics = "payment-commands", concurrency = "4")
     public void onCommand(ConsumerRecord<String, String> record) throws JsonProcessingException {
         String messageId = Headers.messageId(record);
         if (inbox.alreadyProcessed(messageId) || !"ChargePayment".equals(Headers.messageType(record))) {

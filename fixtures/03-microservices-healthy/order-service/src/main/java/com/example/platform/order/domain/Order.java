@@ -69,6 +69,15 @@ public class Order {
         return true;
     }
 
+    /** Watchdog timeout: only an order still waiting for its stock reply may be timed out. */
+    public boolean timeOutWaitingForStock() {
+        if (!transition(Status.PENDING, Status.CANCELLED)) {
+            return false;
+        }
+        this.cancelReason = "timed out waiting for stock reservation";
+        return true;
+    }
+
     public boolean cancel(String reason) {
         if (status == Status.CANCELLED || status == Status.CONFIRMED) {
             return false;

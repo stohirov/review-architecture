@@ -53,7 +53,9 @@ public class OrderSaga {
 
     @Transactional(propagation = Propagation.MANDATORY)
     public void timeOut(Order order) {
-        if (order.cancel("timed out waiting for stock reservation")) {
+        if (order.timeOutWaitingForStock()) {
+            // Inventory may have reserved and its reply been dead-lettered; releasing is a no-op otherwise.
+            outbox.publish(INVENTORY_COMMANDS, key(order.getId()), new ReleaseStock(order.getId()));
             outbox.publish(ORDER_EVENTS, key(order.getId()), new OrderCancelled(order.getId(), order.getCancelReason()));
         }
     }

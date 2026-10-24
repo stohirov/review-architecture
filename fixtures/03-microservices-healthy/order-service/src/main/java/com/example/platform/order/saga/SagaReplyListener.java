@@ -23,7 +23,7 @@ public class SagaReplyListener {
     }
 
     @KafkaListener(topics = {"inventory-events", "payment-events"})
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public void onReply(ConsumerRecord<String, String> record) throws JsonProcessingException {
         if (!inbox.firstDelivery(Headers.messageId(record))) {
             return;
