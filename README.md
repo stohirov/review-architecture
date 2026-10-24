@@ -142,6 +142,7 @@ Feedback from each run was used to tune the skill; see each run's `SUMMARY.md`. 
 
 - `plugins/review-architecture/`: the plugin itself, the only part that gets installed
 - `.claude-plugin/marketplace.json`: makes this repo a one-plugin marketplace
+- `assets/icon.svg`: source of the plugin icon; `plugins/review-architecture/.claude-plugin/icon.png` is rendered from it at 1024×1024
 - `fixtures/`, `evals/`, `test/`: test projects, answer keys, eval runs and the validator and scorer tests; not installed
 
 ## Development
