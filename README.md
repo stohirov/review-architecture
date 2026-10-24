@@ -10,23 +10,42 @@ Recommendations are **proportional**. Every finding names the condition in your 
 
 ## Install
 
+In a Claude Code session (2.1.275 or later):
+
 ```
 /plugin install review-architecture --marketplace stohirov/review-architecture
 ```
 
-Or, for one session from a local clone:
+On older versions, add the marketplace first:
+
+```
+/plugin marketplace add stohirov/review-architecture
+/plugin install review-architecture@review-architecture
+```
+
+From a shell, use the same commands with `claude plugin` in place of `/plugin`. Check the install with `claude plugin list`.
+
+To try it for one session from a local clone, without installing:
 
 ```
 claude --plugin-dir /path/to/review-architecture/plugins/review-architecture
 ```
 
+Updates: run `/plugin marketplace update review-architecture`, or turn on auto-update for this marketplace under `/plugin` → Marketplaces. A release always bumps `version` in `plugin.json`; without a bump, installed copies keep their cache.
+
 ## Use
+
+Ask in plain words; the skill triggers on its own:
 
 ```
 > Review the architecture of this repo
 > Will this scale to 10x?
 > Here's our design for the new booking system: … what would you change?
 ```
+
+Or invoke it by name: `/review-architecture:review-architecture`.
+
+It works best with subagents available, because the lens reviews run in parallel; without them it runs the lenses one after another. Its validator needs Node 20 or later.
 
 The skill writes two files:
 
@@ -118,6 +137,12 @@ r7 is the first pass on the current control fixture: 0 critical, 0 high, 11 medi
 Severity calibration changed in r4: fixture 02 went from 10 criticals (r3) to 2, with recall unchanged.
 
 Feedback from each run was used to tune the skill; see each run's `SUMMARY.md`. r1 and r5 outputs predate later schema changes (`stated_intent` became required after r1, and `dropped` became `triage` after r5), so they no longer validate.
+
+## Repository layout
+
+- `plugins/review-architecture/`: the plugin itself, the only part that gets installed
+- `.claude-plugin/marketplace.json`: makes this repo a one-plugin marketplace
+- `fixtures/`, `evals/`, `test/`: test projects, answer keys, eval runs and the validator and scorer tests; not installed
 
 ## Development
 
