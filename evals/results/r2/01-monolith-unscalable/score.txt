@@ -1,0 +1,24 @@
+01-monolith-unscalable: PASS
+  findings: 24
+  recall: 9/9 (100%)
+    + session-state <- SC-001
+    + local-filesystem <- SC-002
+    + scheduler-no-lock <- SC-004
+    + local-price-cache <- SC-003, SC-005
+    + unbounded-findall <- SC-005
+    + n-plus-one <- PS-002, PS-003
+    + sync-email <- DC-002, DC-003, SC-003, RS-001
+    + open-in-view <- PS-002
+    + stock-lost-update <- DC-001, DC-003
+  bonus: ddl-auto-update, invoice-job-long-tx
+  not in answer key (review by hand):
+    ? DC-005 [high] Checkout is not idempotent: a double-submit or a retry creates duplicate orders
+    ? OP-001 [critical] The CPU-utilization HPA has no CPU requests to measure against, so it cannot scale; there is also no PDB or spread
+    ? OP-003 [high] No auth boundary: price changes, image uploads and order history are open to anyone
+    ? SC-006 [medium] No load shedding: requests queue on pool waits instead of failing fast
+    ? PS-001 [medium] Default Hikari pool times the HPA maximum can exceed PostgreSQL's connection limit
+    ? OP-004 [medium] No graceful shutdown while the HPA scales pods in and out
+    ? OP-005 [medium] A DB password fallback is committed in source, and the manifest injects no secrets
+    ? OP-006 [medium] No metrics registry or alerts ahead of a 20x traffic event
+    ? SB-001 [medium] Feature packages reach into each other's repositories and entities, and controllers expose JPA entities
+    ? OP-007 [low] No correlation id in logs

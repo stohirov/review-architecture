@@ -1,0 +1,27 @@
+02-microservices-distributed-tx: PASS
+  findings: 28
+  recall: 11/11 (100%)
+    + http-in-tx-order <- DC-002
+    + http-in-tx-payment <- DC-007
+    + dual-write-no-outbox <- DC-002, DC-003
+    + no-saga-compensation <- DC-002, DC-004, DC-007
+    + non-idempotent-consumer <- DC-003, DC-004, DC-005
+    + auto-commit-offsets <- MQ-002, MQ-003
+    + no-dlq <- MQ-002, MQ-003
+    + no-timeouts <- RS-001, RS-002, RS-003
+    + shared-database <- SB-001
+    + unsafe-retries <- DC-001
+    + sync-call-chain <- RS-003, RS-004
+  bonus: stock-lost-update, no-circuit-breaker, no-tracing, ddl-auto-update
+  not in answer key (review by hand):
+    ? MQ-001 [critical] Producer type header names a class inventory-service does not have, so every OrderPaidEvent fails to deserialize
+    ? DC-006 [critical] Client-supplied unit price and unvalidated quantities set both the charge and the stock change
+    ? DC-009 [high] POST /orders has no idempotency key: a client or gateway retry creates a second order and a second charge
+    ? PS-001 [high] order_items.order_id has no index, so every stock decrement scans a table that grows with every order
+    ? PS-003 [medium] Default Hikari pools are unsized against a shared Postgres instance and the planned growth
+    ? PS-004 [low] Stock decrement does N+1 selects and per-row updates
+    ? SC-001 [medium] order-events gets a single partition by default, so 5 of 6 inventory consumers sit idle and inventory cannot scale out
+    ? OP-001 [high] No graceful shutdown (Boot 3.3.4 defaults to immediate), so deploys cut in-flight charges
+    ? OP-002 [high] Database credentials committed in application.yml; one superuser shared by all services
+    ? OP-004 [medium] No metrics registry or alerts: consumer lag, DLT volume, PSP latency and pool saturation are invisible
+    ? OP-005 [medium] payment-service's charge endpoint has no service-to-service auth; protection rests on an unseen gateway and network

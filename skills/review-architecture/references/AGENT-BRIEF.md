@@ -30,9 +30,11 @@ Done when every rule in your checklists is marked `hit`, `clear` or `n/a`, each 
 
 ### Ownership
 
+When a root cause fits more than one row, its owner is the lens whose fix closes the failure. For example, a retried non-idempotent POST is closed by idempotency, so data-consistency owns it; an SMTP call inside a transaction is closed by moving it out of the transaction, so data-consistency owns it. If it is still tied, the earlier row wins.
+
 | Root cause | Owner |
 |---|---|
-| remote call inside a transaction; DB plus broker dual write; multi-step flows needing saga or compensation; idempotency of consumers and endpoints; lost updates and races on shared rows; input that corrupts invariants; transaction-boundary misuse | data-consistency |
+| remote call inside a transaction; dual writes (DB plus broker, DB plus callback or API); multi-step flows needing saga or compensation; idempotency of consumers and endpoints; lost updates and races on shared rows; input that corrupts invariants; transaction-boundary misuse | data-consistency |
 | timeouts; circuit breakers; client-side retries and retry stacking; synchronous call chains; bulkheads; optional dependencies on the critical path | resilience |
 | ack and offset handling; DLQ and retry topics; ordering and partition keys; event schema and serialization; request/reply over a broker | messaging |
 | instance-local state, files and caches; schedulers on every replica; slow work in the request path; unbounded results; contention points; backpressure; consumer and thread capacity | scalability |
@@ -42,7 +44,7 @@ Done when every rule in your checklists is marked `hit`, `clear` or `n/a`, each 
 
 ### Severity
 
-Grade by the worst realistic outcome. Then lower it one level if that outcome needs two independent failures at the same time, or infrastructure the repo doesn't show (say which).
+Grade by the worst realistic outcome. Then lower it one level if that outcome needs two independent failures at the same time. If infrastructure the repo doesn't show might *prevent* the failure (a LimitRange, an ingress policy), keep the severity, lower the confidence, and say what would have to exist. In design mode, grade against the brief and the profile's assumptions.
 
 - **critical**: loses or corrupts data, leaves money or stock inconsistent, or causes an outage under normal load. Also: blocks horizontal scaling outright when the project needs more than one instance.
 - **high**: wrong behaviour under ordinary failures (a retry, a crash between two steps, a slow dependency) or at the project's stated scale.
@@ -58,19 +60,19 @@ Grade by the worst realistic outcome. Then lower it one level if that outcome ne
 
 ### Output
 
-Your final message contains exactly these two parts and nothing else:
+Return exactly these two parts and nothing else, as your final message or through the platform's hand-back mechanism:
 
 1. **Rule ledger**: one line per checklist rule, `<rule-id>: hit | clear | n/a, <reason>`.
 2. **Candidates**: one fenced `json` block holding an array of objects with these fields (leave out `id`; the parent assigns it):
    - `lens`
-   - `title`
+   - `title`: one line; wrap placeholders and identifiers in backticks (`` `<topic>-dlt` ``)
    - `severity`
    - `confidence`
    - `locations`:
      - codebase: `[{ "file": "<repo-relative path>", "line": <n> }]`
      - a finding about something *missing*: point at the file where the setting or code belongs, with `"section": "missing <what>"` instead of a line
-     - design mode: `[{ "file": "<brief filename or 'conversation'>", "section": "<the brief's exact heading text>" }]`
-   - `evidence`: quoted code or brief text
+     - design mode: `[{ "file": "<brief filename or 'conversation'>", "section": "<the brief's exact heading text>" }]`; for a gap, the heading of the section where the answer belongs
+   - `evidence`: quoted code, or text quoted verbatim from the brief (never from the profile); for a gap, say what the brief leaves out
    - `failure_scenario`: the concrete sequence of events that goes wrong
    - `recommendation`
    - `pattern`: a kebab-case name from your checklist's vocabulary, or from another lens's if it fits better; coin a new one only when none fits

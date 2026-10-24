@@ -1,0 +1,19 @@
+04-design-brief: PASS
+  findings: 30
+  recall: 6/6 (100%)
+    + shared-database <- SB-001, SB-002
+    + sync-payment-in-booking <- DC-001, DC-003, DC-004, DC-006, RS-001, RS-002, RS-003, RS-004, RS-005
+    + remote-calls-in-tx <- DC-001, DC-002, DC-005, DC-006
+    + location-write-hotspot <- SC-001, SC-002, SC-003, SC-005, PS-001, PS-002, PS-003
+    + matching-in-memory-state <- RS-001, SC-001, SC-002
+    + trip-completed-dual-write <- DC-001, DC-002, MQ-002, MQ-004
+  bonus: notification-on-critical-path, no-saga-booking, payment-consumer-idempotency
+  not in answer key (review by hand):
+    ? SC-004 [medium] TripCompleted capture consumer is not sized for Stripe-blocking work at peak
+    ? MQ-001 [high] No DLQ or retry topic for TripCompleted, so a failing capture blocks its partition or is silently skipped
+    ? MQ-003 [medium] TripCompleted has no schema or versioning, though its producer and consumers deploy independently
+    ? PS-004 [medium] Ride, notification and payment tables grow with every ride, with no partitioning or retention
+    ? OP-001 [medium] Deploys cut in-flight bookings that hold Stripe pre-auths and open transactions
+    ? OP-002 [medium] Probe design is undecided: matching would report ready with an empty map, and DB-checking liveness risks restart storms
+    ? OP-003 [medium] No distributed tracing or correlation id across the booking and trip-completion flows
+    ? OP-004 [medium] The 99.95% ride-request SLO has no SLI, burn-rate alerts, or saturation and lag metrics

@@ -1,0 +1,27 @@
+03-microservices-healthy: FAIL
+  findings: 21
+  recall: 0/0 (100%)
+  control: above max severity: MQ-001, DC-001, SC-001
+  control warning (check by hand): names an implemented pattern: MQ-001, DC-002, OP-002, DC-003, MQ-003, RS-003, OP-005
+  not in answer key (review by hand):
+    ? MQ-001 [high] Dead-lettered records go to <topic>.DLT, not the <topic>-dlt topics that are created, monitored and paged on
+    ? DC-001 [high] Charged amount is computed from client-supplied unit prices
+    ? SC-001 [high] Unbounded order lines let one request poison order-service's outbox relay and stall every saga
+    ? RS-001 [medium] An open PSP circuit does not pause the payment consumer, so a PSP outage longer than ~3 minutes dead-letters ChargePayment commands
+    ? RS-002 [medium] PSP 4xx client errors are retried up to 27 times, count as circuit-breaker failures, and end in the DLT instead of PaymentFailed
+    ? DC-002 [medium] PSP capture attempt is not recorded before the call; recovery relies on the PSP's idempotency-key retention and a manual redrive
+    ? SC-002 [medium] Outbox relay is a serial single-instance pipe: a blocking send plus a per-row merge for every record caps throughput and drain rate
+    ? SC-003 [medium] Payment consumer parallelism is fixed at 12 (partitions = 3 pods x 4 threads) while the handler blocks on the PSP
+    ? PS-001 [medium] Connection budget (3 services x 3 pods x 10) reaches a single Postgres server's default limit; a rollout surge exceeds it
+    ? OP-001 [medium] No outbox-backlog, watchdog or consumer-lag alerting: a stalled relay silently cancels every order
+    ? OP-002 [medium] Traces break at every Kafka hop: no trace context is stored in the outbox, and Kafka observation is off
+    ? OP-003 [medium] Deployments have no resource requests or limits, no PodDisruptionBudget, no topology spread and no startupProbe
+    ? OP-004 [medium] Order API has no edge or auth boundary in the repo: any caller can list any customer's orders or order on their behalf
+    ? PS-002 [low] Index migrations on the hot orders table run without CONCURRENTLY during rolling deploys
+    ? PS-003 [low] Daily outbox purge is one unchunked DELETE, unlike the chunked inbox purge
+    ? DC-003 [low] Concurrent retries with the same Idempotency-Key get a 500, and the key is not scoped to the customer or payload
+    ? DC-004 [low] Stock rows are locked in client-supplied line order, so concurrent multi-SKU reservations can deadlock
+    ? MQ-002 [low] The message-type contract is the producer's Java class name, and order-service silently drops reply types it does not know
+    ? MQ-003 [low] Deterministic failures (missing header, unknown command, unknown order) are retried for ~3 minutes, blocking their partition
+    ? RS-003 [low] No DB statement timeout and a 30-second pool wait on the POST /orders request path
+    ? OP-005 [low] No preStop delay, so order-service refuses requests during the SIGTERM and endpoint-removal race on every rollout

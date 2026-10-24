@@ -215,7 +215,7 @@
                 "section": {
                   "type": "string",
                   "minLength": 1,
-                  "description": "Heading in the brief (design mode) or symbol name."
+                  "description": "Design mode: the brief's exact heading text. Codebase: a symbol name, or 'missing <what>' for a finding about something absent."
                 }
               }
             }

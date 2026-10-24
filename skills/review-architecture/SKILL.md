@@ -24,7 +24,7 @@ Everything below is relative to this skill's directory (the folder holding this 
 - **codebase**: the skill runs inside a repo with source code and the user gave no description.
 - **hybrid**: there is code and a stated intent (target scale, planned split, an RFC), whether the user stated it or the repo's own README, docs or ADRs do. Review the code, and also check it against the intent.
 
-If the request fits none of these cleanly, ask one question.
+If the request fits none of these cleanly, ask one question. If nobody can answer (a headless run), take the most likely mode and record it as an assumption.
 
 Done when the mode is decided.
 
@@ -41,7 +41,7 @@ Done when every profile field is filled or marked `unknown`, the architecture is
 |---|---|
 | `scalability` | always |
 | `persistence` | a datastore exists or is planned |
-| `operability` | codebase or hybrid mode; design mode when deployment is described |
+| `operability` | codebase or hybrid mode; design mode when deployment is described or a likely platform is named |
 | `data-consistency` | anything writes to a datastore |
 | `resilience` | any network call to another service, broker or third party |
 | `service-boundaries` | more than one deployable, or a monolith with several business modules |
@@ -67,13 +67,15 @@ Done when every lens agent has returned its rule ledger and candidate list (the 
 
 Lens agents each see one lens and one slice of code. You see everything. For every candidate:
 
-1. **Evidence**: open the cited location. The quoted evidence must be there. Correct the line number, or drop the candidate.
+1. **Evidence**: open the cited location. The quoted evidence must be there: in code, at that line (correct the line number if it is off); in design mode, verbatim in the brief. Otherwise drop the candidate.
 2. **Mitigation**: search for a fix that lives elsewhere, such as a lock configured in another module, a global client timeout, an outbox relay, or a dedup table. If one exists, drop or downgrade the candidate.
 3. **Proportionality**: check `applies_when` against the profile. Drop recommendations the project's scale or shape does not justify.
 4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the ownership table in `references/AGENT-BRIEF.md`, and fold the other angle into it.
 5. **Severity**: re-grade against the scale in `references/AGENT-BRIEF.md`. A critical or high finding needs medium or high confidence after your own reading.
 
 Assign ids by lens prefix and sequence: `SC` scalability, `DC` data-consistency, `RS` resilience, `SB` service-boundaries, `MQ` messaging, `PS` persistence, `OP` operability (for example `DC-001`).
+
+Then write `strengths`: the patterns that are already done right, taken from rules the ledgers mark `clear` because a mitigation exists.
 
 Done when you have personally re-read the evidence for every surviving critical or high finding, and every candidate is kept, merged or dropped.
 

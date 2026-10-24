@@ -5,8 +5,8 @@
 ## Sections, in order
 
 1. **Title and scope**: `# Architecture review: <target>`, then the mode, the date, the lenses that ran (and why any were skipped), and any lens the parent had to run itself.
-2. **Summary**: 3–5 sentences: what the system is, its biggest risk, and the one change that buys the most. Then a severity count table.
-3. **Architecture profile**: the profile from step 2, including the assumptions, plus one Mermaid diagram of the deployables, datastores and brokers as they *are* (or as the brief plans them). Mark every edge sync or async. Highlight the edges and nodes that findings touch, for example with `classDef risk stroke:#d33,stroke-width:3px`.
+2. **Summary**: 3–5 sentences: what the system is, its biggest risk, and the one change that buys the most. In hybrid mode, add one sentence on whether the system can meet its stated intent. Then a severity count table.
+3. **Architecture profile**: the profile from step 2, including the assumptions, plus one Mermaid diagram of the deployables, datastores and brokers as they *are* (or as the brief plans them). Mark every edge sync or async, and label risky edges with their finding ids (`A -- "sync · RS-001" --> B`). Highlight the nodes that findings touch with `classDef risk stroke:#d33,stroke-width:3px`. Quote any label that contains parentheses or braces.
 4. **Findings**: under `## Findings`, one `### Critical` / `### High` / `### Medium` / `### Low` / `### Info` heading per severity that has findings, in that order. Each finding gets:
    - `#### <id> · <title>` (the validator's `--report` check looks for this heading), and a line with severity, confidence, lens and effort
    - **Where**: locations as `path:line` (design mode: the brief section)
@@ -16,11 +16,11 @@
    - **Why it's worth it here**: `applies_when`
    - For a fix that changes how data flows (outbox, saga, idempotent consumer), add a small Mermaid sequence diagram of the fixed flow.
 5. **Roadmap**: findings ordered into
-   - **Now**: critical and high, small or medium effort
-   - **Next**: the remaining critical and high, plus medium findings that unblock them
-   - **Later**: the rest
+   - **Now**: critical and high with small or medium effort, plus any finding (of any severity) their fixes depend on
+   - **Next**: the remaining critical and high, then the medium findings
+   - **Later**: low findings, and info findings that carry an action
 
-   Inside each bucket, put a finding before the findings whose fix depends on it ("unblocks" means exactly this), then order by severity. Info findings go in Later only if they carry an action.
+   Inside each bucket, put a finding before the findings whose fix depends on it ("unblocks" means exactly this), then order by severity. Write "nothing" when an item unblocks nothing.
 
    One line per item: id, the action, and what it unblocks.
 6. **What's already sound**: the `strengths` from the JSON. Name the patterns done right, so nobody "fixes" them.

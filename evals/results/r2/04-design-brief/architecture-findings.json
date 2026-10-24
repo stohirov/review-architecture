@@ -1,0 +1,578 @@
+{
+  "schema_version": 1,
+  "mode": "design",
+  "target": "RideNow: architecture brief (draft v0.3), project-brief.md",
+  "profile": {
+    "architecture": "microservices",
+    "summary": "RideNow is a ride-hailing platform for 3 cities (~4M people). Riders request a ride, get matched to a nearby driver and track the trip live, and their card is charged (Stripe pre-auth at booking, capture at trip end). It is planned as 8 microservices that all share one PostgreSQL schema.",
+    "stated_intent": "Launch: 15,000 active drivers at peak, 120,000 rides/day. Year two: 50,000 drivers, 400,000 rides/day, two more cities. Peak hour (Friday night) about 4x the daily average. 99.95% availability for requesting a ride. 4 squads of ~6 engineers, each owning two services and shipping independently.",
+    "assumptions": [
+      "Nobody was available to answer the intake questions; every item below was decided in their place.",
+      "All 'active drivers at peak' are online and sending GPS pings at the same time.",
+      "Average trip, including pickup, is about 20 minutes. This is used for the concurrent-trip and polling estimates.",
+      "Must never be lost or doubled: card pre-auth, capture, ride state, driver assignment (one driver per ride, one ride per driver). Location may lag by a few seconds.",
+      "The stack is not stated. Java 17 / Spring Boot 3.x is assumed only for code sketches and framework defaults.",
+      "The operability lens was run because the brief names deployment ('probably Kubernetes') and observability as open decisions.",
+      "The driver-location endpoint (GET /bookings/{id}/driver-location) is assumed to be served by booking-service, because of its path."
+    ],
+    "derived_load": [
+      "GPS writes: 15,000 drivers / 2 s = 7,500 UPDATEs/s on `drivers` at launch peak; 25,000/s in year two, all on the single primary",
+      "Bookings: 120k/day = 1.4/s average, ~5.6/s peak; year two 400k/day = 4.6/s average, ~18.5/s peak",
+      "Concurrent trips at peak: ~5.6/s x 1,200 s = ~6,700 (year two ~22,000)",
+      "Rider location polls: ~6,700 GETs/s at launch peak, ~22,000/s in year two, each reading a `drivers` row",
+      "Matching queries: at least 1 per booking (~5.6/s peak, ~18.5/s year two), each sorting the hot `drivers` table by distance",
+      "Stripe: ~5.6 pre-auths/s plus ~5.6 captures/s at launch peak"
+    ],
+    "stack": [
+      "Not stated (Java 17 / Spring Boot 3.x assumed for sketches)",
+      "PostgreSQL (1 primary, 1 read replica)",
+      "Kafka",
+      "Stripe",
+      "Push and SMS providers"
+    ],
+    "deployables": [
+      "api-gateway (planned): routing and auth",
+      "rider-service (planned): rider profiles and saved payment methods",
+      "driver-service (planned): driver profiles, documents, availability status; REST callback to matching-service on online/offline",
+      "location-service (planned): receives GPS pings every 2 s per driver and writes them to `drivers`; answers 'where is driver X'",
+      "matching-service (planned): finds the nearest available driver from an in-memory map plus an SQL distance sort; one instance at launch",
+      "booking-service (planned): ride lifecycle REQUESTED -> MATCHED -> IN_PROGRESS -> COMPLETED; sync calls to payment, matching and notification inside one DB transaction; publishes TripCompleted",
+      "payment-service (planned): Stripe pre-auth and capture; consumes TripCompleted",
+      "notification-service (planned): push notifications and SMS"
+    ],
+    "datastores": [
+      "PostgreSQL: one cluster (primary + read replica), single `ridenow` schema SHARED by all 8 services, with cross-service joins allowed"
+    ],
+    "messaging": [
+      "Kafka: TripCompleted (producer booking-service; consumers payment-service capture, receipts, driver earnings). Published after the DB commit; no outbox, key, DLQ or delivery guarantee stated"
+    ],
+    "key_flows": [
+      "Book ride: rider app -> api-gateway -> booking-service [DB tx open] -> payment-service -> Stripe; -> matching-service; -> notification-service -> push/SMS; -> commit MATCHED",
+      "Complete trip: booking-service commit COMPLETED -> Kafka TripCompleted -> payment-service -> Stripe capture; -> receipts; -> earnings",
+      "Live location: driver app -> location-service -> UPDATE drivers (primary) <- rider app GET /bookings/{id}/driver-location every 1 s <- matching-service distance query",
+      "Availability: driver-service -> REST callback -> matching-service in-memory map"
+    ],
+    "background_work": [
+      "Kafka consumers of TripCompleted: payment capture (payment-service), receipts, driver earnings",
+      "No schedulers stated"
+    ],
+    "runtime": "Unknown. Deployment is 'probably Kubernetes' and observability tooling is undecided. api-gateway handles routing and auth. matching-service runs as one instance at launch.",
+    "lenses_run": [
+      "scalability",
+      "persistence",
+      "operability",
+      "data-consistency",
+      "resilience",
+      "service-boundaries",
+      "messaging"
+    ]
+  },
+  "findings": [
+    {
+      "id": "DC-001",
+      "lens": "data-consistency",
+      "title": "Stripe pre-auth, matching and push run inside the booking DB transaction, and a rollback cannot undo them",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" }
+      ],
+      "evidence": "\"booking-service calls payment-service synchronously, which calls Stripe to pre-authorize the estimated fare. If Stripe is slow, the request waits; we will set a generous timeout so we don't lose bookings.\" ... \"All of steps 2–6 run inside one database transaction in booking-service, so if anything fails the booking is rolled back cleanly.\"",
+      "failure_scenario": "(1) At Friday peak the Stripe pre-auth succeeds, then matching finds no nearby driver (a normal outcome at peak, no fault needed) and throws. The transaction rolls back and the ride row vanishes, but the hold stays on the rider's card for up to ~7 days, and no row references it. The rider taps again and gets a second hold. (2) notification-service has already pushed 'driver on the way' to both apps when the commit fails or times out. The booking rolls back, but the driver is now driving to a pickup that does not exist. (3) booking-service crashes mid-flow: the REQUESTED row was never committed, so nothing can reconcile the orphaned PaymentIntent. (4) While Stripe is slow, each booking holds a connection on the shared primary for the whole 'generous' timeout (5.6/s x 30 s = ~170 connections), which starves every other service on the cluster.",
+      "recommendation": "Split the flow into short local transactions. (a) Insert the ride as REQUESTED, commit, and return 202 with the booking id. (b) Call payment-service and Stripe outside any transaction, with Stripe idempotency key = rideId + step, then commit PAYMENT_AUTHORIZED with the PaymentIntent id. (c) Claim the driver atomically (DC-006) and commit MATCHED. (d) Send notifications from an outbox row or an after-commit hook, never inside the transaction. Failed steps trigger compensations (DC-003).",
+      "pattern": "move-call-outside-transaction",
+      "applies_when": "Every booking performs side effects that a database rollback cannot reverse (a Stripe hold, push/SMS, a dispatched driver), on a database that all 8 services share.",
+      "effort": "medium"
+    },
+    {
+      "id": "DC-002",
+      "lens": "data-consistency",
+      "title": "TripCompleted is published after commit with no outbox, so one crash loses the capture, receipt and earnings",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Trip completion" }
+      ],
+      "evidence": "\"When the driver ends the trip, booking-service sets the ride to `COMPLETED`, then publishes a `TripCompleted` event to Kafka right after the database commit. payment-service consumes it and captures the final fare. Receipts and driver earnings are computed by consumers of the same event.\"",
+      "failure_scenario": "booking-service commits COMPLETED, and then before the send succeeds the pod is killed by a rolling deploy, Kafka is briefly unavailable, or an acks=1 send is lost in a leader failover. The event is never published. The ride shows COMPLETED, but payment-service never captures, so the pre-auth lapses after ~7 days and the fare is lost. The rider gets no receipt and the driver gets no earnings credit. Nothing retries, because the only record that a capture was needed was the in-flight send. At 120k rides/day, a 0.01% loss rate is ~12 uncollected fares a day, and nothing detects them.",
+      "recommendation": "Write a TripCompleted outbox row in the same transaction that sets COMPLETED, and publish it with a relay (polling publisher, or Debezium CDC on the outbox table) that retries and marks rows sent. Configure the producer with acks=all and enable.idempotence=true, and key events by rideId (MQ-004). Consumers must then be idempotent (DC-005). Add a reconciliation check for rides that are COMPLETED but have no capture after N minutes.",
+      "pattern": "transactional-outbox",
+      "applies_when": "Payment capture, receipts and driver earnings all depend on this one event to stay correct.",
+      "effort": "medium"
+    },
+    {
+      "id": "DC-003",
+      "lens": "data-consistency",
+      "title": "Ride lifecycle has no saga state or compensations: nothing voids a pre-auth on no-match or cancel, and failed captures have no path",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Services" },
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Trip completion" }
+      ],
+      "evidence": "\"booking-service: owns the ride lifecycle (requested → matched → in progress → completed).\" ... \"pre-authorize the estimated fare\" ... \"payment-service consumes it and captures the final fare.\" The brief has no CANCELLED or FAILED state, no void or refund step, and no handling for a failed capture.",
+      "failure_scenario": "A rider cancels after MATCHED, or the driver never arrives. No state or step voids the pre-auth or releases the driver, so the hold stays and the driver remains tied to a dead ride. At trip end, the final fare (a detour, waiting time) exceeds the estimated amount that was pre-authorized, or the card declines. Capture fails, yet the ride is COMPLETED and the earnings consumer has already credited the driver from the same event, so the company pays out money it never collected. Nobody can list the rides that are 'completed but unpaid'.",
+      "recommendation": "Make booking-service an orchestrator with persisted saga state on the ride: REQUESTED -> PAYMENT_AUTHORIZED -> MATCHED -> IN_PROGRESS -> COMPLETED -> PAYMENT_CAPTURED, plus terminal CANCELLED, NO_DRIVER and PAYMENT_FAILED. Define a compensation for each step: void the PaymentIntent on NO_DRIVER or CANCELLED, release the driver on cancel, and on capture failure re-authorize the difference or flag the ride for collection. Compute the fare server-side from the trip record. payment-service emits PaymentCaptured / PaymentFailed, and earnings are driven by PaymentCaptured (or an explicit policy). Add a daily reconciliation of Stripe PaymentIntents against ride states.",
+      "pattern": "saga-orchestration",
+      "applies_when": "The flow spans Stripe and several services and has cancel and no-match branches. A flow with three or more steps that moves money justifies an orchestrator, and booking-service already owns the lifecycle.",
+      "effort": "large"
+    },
+    {
+      "id": "DC-004",
+      "lens": "data-consistency",
+      "title": "POST /bookings has no idempotency key, so a client retry creates a second ride and a second card hold",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" }
+      ],
+      "evidence": "\"1. The rider app calls `POST /bookings`.\" ... \"If Stripe is slow, the request waits; we will set a generous timeout so we don't lose bookings.\"",
+      "failure_scenario": "Stripe or matching is slow, so the booking takes longer than the mobile client's or the gateway's timeout. The app retries POST /bookings, or the rider taps again, while the first request is still running. Both complete: two rides, two Stripe holds on the card, and two drivers sent to the same rider. The generous server-side timeout makes client timeouts and retries more likely, not less.",
+      "recommendation": "Require an Idempotency-Key header (a client-generated UUID per booking attempt). Store it on the ride row under a unique constraint, and return the existing ride on a repeat. Derive the Stripe idempotency key from the ride id. Also enforce one active ride per rider with a partial unique index on rides(rider_id) WHERE status is an active state.",
+      "pattern": "idempotency-key",
+      "applies_when": "The endpoint places a card hold and dispatches a driver, and mobile clients on flaky networks call it.",
+      "effort": "small"
+    },
+    {
+      "id": "DC-005",
+      "lens": "data-consistency",
+      "title": "TripCompleted consumers and end-trip are not idempotent, so a redelivery pays earnings twice",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Trip completion" }
+      ],
+      "evidence": "\"payment-service consumes it and captures the final fare. Receipts and driver earnings are computed by consumers of the same event.\" The brief mentions no dedup, no processed-event table, and no state guard on the COMPLETED transition.",
+      "failure_scenario": "The earnings consumer adds the fare to the driver's balance. Then it crashes, or a rebalance happens during a rolling deploy, before the offset is committed, and Kafka redelivers the event. The driver is credited twice and the second rider receipt goes out. Separately, the driver app retries 'end trip' on a flaky network. booking-service sets COMPLETED again and publishes a second TripCompleted, and payment-service attempts a second capture. Stripe rejects it as already captured, the handler treats that as a failure, and it retries or dead-letters, which hides real failures among the noise.",
+      "recommendation": "Give every event an eventId and the rideId. In each consumer, insert (consumer, rideId) into a processed table with a unique constraint, in the same local transaction as the effect. Write earnings as a ledger row keyed by rideId, not a balance increment. In payment-service, use the Stripe idempotency key 'capture-' + rideId and treat 'already captured' as success. In booking-service, make the transition conditional (UPDATE rides SET status='COMPLETED' WHERE id=? AND status='IN_PROGRESS') and emit the event only when one row changed.",
+      "pattern": "idempotent-consumer",
+      "applies_when": "Kafka delivers at least once, and these handlers move money (capture and earnings).",
+      "effort": "medium"
+    },
+    {
+      "id": "DC-006",
+      "lens": "data-consistency",
+      "title": "Driver assignment is check-then-act with no atomic claim, so two bookings can get the same driver",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Live location" }
+      ],
+      "evidence": "\"matching-service keeps the list of available drivers in an in-memory map that driver-service updates through a REST callback whenever a driver goes online or offline.\" ... \"matching-service also queries this table to find nearby drivers (`ORDER BY` distance computed in SQL).\"",
+      "failure_scenario": "At peak, around a venue at closing time, two ride requests 200 ms apart both read the same nearest 'available' driver from the map or the SQL sort, and both booking transactions commit MATCHED with that driver_id. One rider waits for a driver who is serving someone else, and still holds a card pre-auth. The map changes only when a driver goes online or offline, so an already-assigned driver can keep being offered to later requests as well. Once more matching instances are added, each with its own map, the race becomes certain.",
+      "recommendation": "Claim the driver atomically in the short MATCHED transaction: UPDATE drivers SET status='ASSIGNED', current_ride_id=:ride WHERE id=:driver AND status='AVAILABLE', check that exactly one row changed, and try the next candidate otherwise. Back it with a partial unique index on rides(driver_id) WHERE status IN ('MATCHED','IN_PROGRESS'). Release the driver on completion, and as a compensation on cancel or no-show. Treat the matching index only as a candidate list.",
+      "pattern": "atomic-conditional-update",
+      "applies_when": "Bookings in dense areas run concurrently, and 'one ride per driver' must hold.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-001",
+      "lens": "resilience",
+      "title": "Ride request is an 8-link synchronous chain ending in Stripe and push/SMS, below the 99.95% target",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Targets" }
+      ],
+      "evidence": "\"3. booking-service calls payment-service synchronously, which calls Stripe ... 4. booking-service calls matching-service synchronously ... We'll run one matching-service instance at launch ... 5. booking-service calls notification-service synchronously ... 6. booking-service updates the ride to `MATCHED` and returns the result to the rider app.\" and \"Availability target for requesting a ride: 99.95%.\"",
+      "failure_scenario": "A ride request succeeds only if all of these are up at once: api-gateway, booking-service, payment-service, Stripe, matching-service (one instance, so every deploy or OOM is a full matching outage), notification-service, the push/SMS provider and the Postgres primary. Even at 99.95% each, eight links in series give about 99.6%, which is roughly 3 hours of failed ride requests a month against a 22-minute budget. Latencies add up as well. The rider waits on Stripe p99 plus matching plus push, and each waiting request holds a booking-service thread. A Stripe slowdown to 20-30 s pins 110-170 of Tomcat's default 200 threads, and the whole service stops answering (merged from the scalability lens's slow-work finding).",
+      "recommendation": "Shorten the synchronous path to gateway -> booking-service -> its own DB. POST /bookings persists REQUESTED and returns 202 with the booking id. Pre-auth, matching and notification then run as the event-driven saga in DC-003, and the rider app follows progress by push or a status poll. Run matching-service with at least 2 replicas before launch (SC-001). Use bounded executors so a slow dependency queues or sheds work instead of taking every thread.",
+      "pattern": "async-decoupling",
+      "applies_when": "The core flow has a 99.95% target and depends on 4 internal services and 2 third parties whose latency the team does not control.",
+      "effort": "large"
+    },
+    {
+      "id": "RS-002",
+      "lens": "resilience",
+      "title": "A notification failure rolls back an otherwise successful booking",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" }
+      ],
+      "evidence": "\"5. booking-service calls notification-service synchronously to push 'driver on the way' to the rider and the driver.\" and \"All of steps 2–6 run inside one database transaction in booking-service, so if anything fails the booking is rolled back cleanly.\"",
+      "failure_scenario": "During the Friday peak the push or SMS provider times out, or notification-service is mid-deploy. Step 5 throws after Stripe has already authorized the card and matching has already picked a driver. The whole booking rolls back and the rider sees 'booking failed', although both a payment and a driver were available. An outage of a non-essential channel has become an outage of ride requests.",
+      "recommendation": "Take notification off the critical path. After MATCHED commits, write a DriverAssigned outbox event. notification-service consumes it and retries delivery out of band. Both apps also learn of the assignment from the booking status, so a failed push only delays a message and never fails a booking.",
+      "pattern": "async-decoupling",
+      "applies_when": "Notification is not needed to answer POST /bookings correctly, yet its exception currently fails the core flow.",
+      "effort": "medium"
+    },
+    {
+      "id": "RS-003",
+      "lens": "resilience",
+      "title": "A 'generous' Stripe timeout, and no stated timeouts on matching or notification",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" }
+      ],
+      "evidence": "\"If Stripe is slow, the request waits; we will set a generous timeout so we don't lose bookings.\" No timeout is stated for the matching-service (step 4) or notification-service (step 5) calls.",
+      "failure_scenario": "On a Friday peak Stripe slows to 20-30 s responses. Every booking waits the full generous timeout while holding a thread in booking-service and in payment-service. Riders give up after a few seconds and tap again (DC-004), which adds more waiting requests. Both services exhaust their thread pools and bookings fail outright. The long timeout loses more bookings than it saves, because the rider has left long before it expires.",
+      "recommendation": "Give every outbound client a connect timeout (~1 s) and a read timeout set from the dependency's p99 plus headroom (for example 3-5 s for the Stripe pre-auth). Propagate an overall request deadline from the gateway. To avoid losing bookings, persist REQUESTED first (DC-001), so a slow Stripe delays a booking instead of dropping it.",
+      "pattern": "timeouts",
+      "applies_when": "Stripe and internal services are called synchronously on the ride-request path, which has a 99.95% target.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-004",
+      "lens": "resilience",
+      "title": "No circuit breaker or fast-fail around Stripe, matching and notification",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Not decided yet" }
+      ],
+      "evidence": "Steps 3-5 call payment-service (then Stripe), matching-service and notification-service (then push/SMS) synchronously. The brief describes no breaker, fallback or degraded mode, and deployment is only \"probably Kubernetes\", so no mesh-level outlier detection can be assumed.",
+      "failure_scenario": "The SMS provider or Stripe has a 10-minute brownout. Every booking still waits the full timeout before it fails, which ties up threads and keeps hammering the struggling dependency, so it recovers more slowly. When the dependency comes back, the backlog of retried requests hits it all at once.",
+      "recommendation": "Put a circuit breaker (Resilience4j, or mesh outlier detection) around each dependency, with an explicit fallback. For notification, skip and retry out of band. For Stripe, hold the booking in PAYMENT_PENDING and retry, or fail fast with a clear message. For matching, fail fast and queue the request for re-matching.",
+      "pattern": "circuit-breaker",
+      "applies_when": "Several dependencies that fail independently (Stripe, push/SMS, a single matching instance) sit on the booking path at peak volume.",
+      "effort": "small"
+    },
+    {
+      "id": "RS-005",
+      "lens": "resilience",
+      "title": "Booking path shares threads and gateway capacity with unrelated dependencies and ~14k/s of location traffic",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Live location" }
+      ],
+      "evidence": "\"The rider app polls `GET /bookings/{id}/driver-location` every second during a trip, which reads the same row.\" booking-service also makes the synchronous Stripe, matching and notification calls, and driver pings and rider polls pass through the same api-gateway as POST /bookings.",
+      "failure_scenario": "Stripe slows down, and booking requests waiting on it fill booking-service's shared request and HTTP-client pools. The location polls and end-trip calls served by the same service queue behind them, so riders mid-trip see a frozen driver and drivers cannot end trips. In the other direction, a surge of pings or polls saturates the gateway's shared upstream capacity and crowds out ride requests.",
+      "recommendation": "Give booking-service separate bounded client pools for each dependency (payment, matching, notification), or Resilience4j bulkheads. At the gateway, give the telemetry routes (pings, location polls) their own concurrency limit, or a separate ingress, so they cannot starve POST /bookings. Moving the location read out of booking-service is covered by SC-003.",
+      "pattern": "bulkhead",
+      "applies_when": "Bookings (~5.6/s) share threads and the gateway with ~14k/s of location traffic and with calls to unreliable third parties.",
+      "effort": "medium"
+    },
+    {
+      "id": "SC-001",
+      "lens": "scalability",
+      "title": "Driver availability lives in one matching instance's memory, fed by best-effort REST callbacks",
+      "severity": "critical",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Targets" }
+      ],
+      "evidence": "\"matching-service keeps the list of available drivers in an in-memory map that driver-service updates through a REST callback whenever a driver goes online or offline. We'll run one matching-service instance at launch and add more later.\" and \"Availability target for requesting a ride: 99.95%.\"",
+      "failure_scenario": "(1) A deploy, crash, OOM or node drain restarts the single matching pod, and the map comes back empty. Callbacks fire only on online or offline transitions, so the ~15,000 drivers who are already online are never re-registered. Every POST /bookings returns 'no driver available' until drivers toggle their status, which turns a routine deploy into a ride-request outage against a 22-minute monthly budget. (2) A driver goes offline, but the callback fails because matching is mid-deploy or the call times out. The offline driver stays in the map and keeps being matched, and nothing retries or reconciles. The reverse also happens: an online driver whose callback was lost never receives rides (merged from the data-consistency lens's dual-write finding). (3) When the second replica is added 'later', each callback reaches only one replica through the load balancer, so each replica sees a different subset of drivers.",
+      "recommendation": "Make matching-service stateless and run at least 2 replicas from day one. Keep availability and position in a shared geo index: Redis GEO per city, or a PostGIS table in location-service's own store. Feed it from location pings with a heartbeat TTL, so a driver counts as available only if their status is available AND they pinged in the last ~10 s. Publish status changes as DriverAvailabilityChanged events through an outbox, keyed by driverId on a compacted topic that any replica can replay, instead of a point-to-point REST callback. Gate readiness on the index being warm (OP-002). Combine this with the atomic claim in DC-006, so that stale data can never produce a wrong assignment.",
+      "pattern": "stateless-service",
+      "applies_when": "Ride requests carry a 99.95% target, the brief already plans more matching replicas, and any restart or scale-out breaks the current design.",
+      "effort": "medium"
+    },
+    {
+      "id": "SC-002",
+      "lens": "scalability",
+      "title": "GPS pings become 7,500-25,000 single-row UPDATEs/s on the shared primary's `drivers` table",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Live location" },
+        { "file": "project-brief.md", "section": "Data" }
+      ],
+      "evidence": "\"Drivers' apps send a GPS ping every 2 seconds while online. location-service writes each ping as an `UPDATE drivers SET lat = ?, lng = ? WHERE id = ?` on the shared Postgres.\" and \"one shared PostgreSQL cluster (one primary, one read replica)\"",
+      "failure_scenario": "Launch peak is 15,000 / 2 s = 7,500 commits/s, and year two is 25,000/s, all on the one primary that also runs the booking, payment and driver-service transactions. Each UPDATE writes a new version of the whole `drivers` row (profile, documents, availability) plus its WAL. If lat/lng are indexed to speed up matching, HOT updates stop and every index on the table is rewritten too. The ping updates take row locks on the same rows that driver-service (availability) and booking (assignment) update, and the WAL volume drives replica lag. At launch a well-provisioned primary can likely absorb this. At year-two volume on a shared primary, the Friday peak saturates its I/O and CPU, and because all 8 services share it, ride requests fail with everything else.",
+      "recommendation": "Move live position out of the transactional schema. location-service writes the latest position to an in-memory geo store (Redis GEOADD per city, with a TTL) and appends pings to a Kafka topic keyed by driverId for trip trails and analytics. Persist only per-trip breadcrumbs, batched. If position must stay in Postgres for launch: use a narrow driver_locations(driver_id, lat, lng, updated_at) table separate from `drivers`, with fillfactor ~50 and no index on the updated columns, and coalesce pings into one multi-row UPDATE per second per pod.",
+      "pattern": "ephemeral-state-store",
+      "applies_when": "Thousands of ephemeral position writes per second, growing ~3.3x in year two, for data the business accepts as a few seconds stale.",
+      "effort": "large"
+    },
+    {
+      "id": "SC-003",
+      "lens": "scalability",
+      "title": "1 Hz rider location polling reads the hot `drivers` row through booking-service and the primary",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Live location" }
+      ],
+      "evidence": "\"The rider app polls `GET /bookings/{id}/driver-location` every second during a trip, which reads the same row.\"",
+      "failure_scenario": "About 6,700 concurrent trips at launch peak produce ~6,700 GETs/s, and year two produces ~22,000/s. Each request goes gateway -> booking-service (assumed from the path) -> a ride lookup plus a read of a `drivers` row on the primary, which is also absorbing 7,500 updates/s. Pings arrive every 2 s, so half of the polls return unchanged data. booking-service ends up sized by polling traffic, and its threads and DB connections are shared with POST /bookings. A polling surge (a Friday peak, or an app bug that keeps polling after the trip ends) therefore degrades the 99.95% ride-request path.",
+      "recommendation": "Serve driver location from the location store (SC-002) through location-service, with its own replicas, not through booking-service. Prefer push (WebSocket or SSE per trip, fed from the ping stream). If polling stays, poll every 2-3 s with ETag/304, and authorize once per trip with a scoped token instead of looking the ride up on every poll. Any read that stays on Postgres should go to the read replica, since the brief tolerates seconds of lag.",
+      "pattern": "cqrs-read-model",
+      "applies_when": "Read traffic matches the write traffic on the same hot rows, and the data tolerates seconds of staleness.",
+      "effort": "medium"
+    },
+    {
+      "id": "SC-004",
+      "lens": "scalability",
+      "title": "TripCompleted capture consumer is not sized for Stripe-blocking work at peak",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Trip completion" }
+      ],
+      "evidence": "\"publishes a `TripCompleted` event to Kafka right after the database commit. payment-service consumes it and captures the final fare.\" No partition count or consumer concurrency is stated.",
+      "failure_scenario": "With the broker default of num.partitions=1 and one listener thread, a capture handler that blocks on Stripe for 0.3-1 s handles 1-3 captures/s, against 5.6/s at launch peak and 18.5/s in year two. Lag builds all Friday evening, and captures, receipts and earnings arrive hours late. A slow poll batch (default max.poll.records=500) overruns max.poll.interval.ms, and the group falls into a rebalance loop that redelivers captures. Graded medium because the outcome depends on defaults the brief does not pin.",
+      "recommendation": "Declare the topic with partitions sized for year two (for example 24-48), and keep consumer concurrency x replicas at or below the partition count. Use a small max.poll.records (10-50) for the Stripe handler and tune max.poll.interval.ms. Alert on lag per consumer group (OP-004).",
+      "pattern": "consumer-concurrency",
+      "applies_when": "A consumer that moves money blocks on a third party, and event volume peaks at 4x the average.",
+      "effort": "small"
+    },
+    {
+      "id": "SC-005",
+      "lens": "scalability",
+      "title": "No rate limiting or load shedding at the gateway for booking, polling and ping traffic",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Services" },
+        { "file": "project-brief.md", "section": "Targets" }
+      ],
+      "evidence": "\"**api-gateway**: routing and auth.\" and \"Peak hour (Friday night) is about 4× the daily average.\"",
+      "failure_scenario": "On a Friday 4x peak, riders re-tapping slow bookings, apps that keep polling after the trip ends, and driver apps flushing buffered pings after a reconnect all reach the services, and through them the shared primary, with no limit. Nothing sheds the cheap traffic (polls) to protect the critical path (POST /bookings), so the system collapses instead of degrading.",
+      "recommendation": "Add per-client rate limits at the gateway: bookings per rider, at most 1 ping per driver per second, and at most 1 location poll per 2 s per trip. Use bounded queues. Under overload, prioritize POST /bookings and shed polls first.",
+      "pattern": "rate-limiting",
+      "applies_when": "Public mobile clients generate thousands of requests per second against a shared backend with a 99.95% target.",
+      "effort": "small"
+    },
+    {
+      "id": "SB-001",
+      "lens": "service-boundaries",
+      "title": "All 8 services share one schema and join each other's tables",
+      "severity": "high",
+      "confidence": "high",
+      "locations": [
+        { "file": "project-brief.md", "section": "Data" },
+        { "file": "project-brief.md", "section": "Live location" }
+      ],
+      "evidence": "\"all eight services connect to one shared PostgreSQL cluster (one primary, one read replica) with a single `ridenow` schema. Services can join across each other's tables when they need data, for example booking-service joins `drivers` and `riders` directly to build the trip receipt.\" and \"Team: 4 squads of about 6 engineers, each owning two services and shipping independently.\"",
+      "failure_scenario": "(1) The driver squad renames or splits a `drivers` column. location-service's UPDATE, matching-service's distance query and booking-service's receipt join, which belong to other squads, break at runtime. During the rolling deploy, old pods of those services fail against the new schema. Every schema change becomes a cross-squad release, which defeats the brief's goal of shipping independently. (2) location-service's 7,500-25,000 writes/s land on the same primary that booking and payment write to, so ride requests fail because of another service's load. (3) No service owns the invariants of a `drivers` row: driver-service writes availability, location-service writes position, booking writes assignment.",
+      "recommendation": "Move to database-per-service: at minimum, one schema and one DB role per service, with no cross-schema grants. This is cheap on the same cluster at first. Services expose data through APIs or events. booking-service snapshots the rider and driver details it needs at booking time (data-replication-via-events), and the receipt consumer builds receipts from event data. Live position moves to location-service's own store (SC-002). Introduce this table by table: first assign each table one owner (PS-003), then revoke cross-schema access.",
+      "pattern": "database-per-service",
+      "applies_when": "The services are explicitly meant to be deployed independently by 4 squads, and one service's write load is orders of magnitude above the others.",
+      "effort": "large"
+    },
+    {
+      "id": "SB-002",
+      "lens": "service-boundaries",
+      "title": "Driver supply state is split across driver-, location- and matching-service, which must change together",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Services" },
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Live location" }
+      ],
+      "evidence": "\"**driver-service**: driver profiles, documents, availability status.\" \"**location-service**: receives driver GPS pings and answers 'where is driver X'.\" \"matching-service keeps the list of available drivers in an in-memory map that driver-service updates through a REST callback\" ... \"matching-service also queries this table to find nearby drivers\".",
+      "failure_scenario": "The product adds a driver 'on break' state, or filtering by vehicle type. That needs coordinated changes to driver-service's callback contract, matching's map, location-service's table and booking's joins, owned by up to three squads and shipped in lockstep. The team pays microservices' network and consistency costs without getting independent deploys on the most-changed part of the domain.",
+      "recommendation": "Draw a 'dispatch' bounded context that owns driver supply end to end: availability, live position, the geo index and matching, as one service or a tightly owned pair in one squad. Keep driver-service for profiles and documents. booking-service talks to dispatch and payment through commands and events, and consumer-driven contracts cover the remaining seams. This is a redraw, not a merge into a monolith: the 4-squad structure does justify separate services.",
+      "pattern": "bounded-context",
+      "applies_when": "Matching needs availability and position at high rates, and the squads are expected to ship independently.",
+      "effort": "medium"
+    },
+    {
+      "id": "MQ-001",
+      "lens": "messaging",
+      "title": "No DLQ or retry topic for TripCompleted, so a failing capture blocks its partition or is silently skipped",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Trip completion" }
+      ],
+      "evidence": "\"payment-service consumes it and captures the final fare. Receipts and driver earnings are computed by consumers of the same event.\" The brief says nothing about retry, dead-letter or poison-message handling for these consumers.",
+      "failure_scenario": "payment-service cannot process one TripCompleted: a malformed payload after a producer change, a Stripe card_declined surfaced as an exception, or a missing PaymentIntent. Either it is retried forever and blocks every later capture on that partition, or (Spring Kafka's DefaultErrorHandler) it is retried a few times and then logged and skipped, so that ride's fare is never captured and nobody is told.",
+      "recommendation": "For each consumer, use a retry topic with backoff for transient errors (Stripe 5xx, timeouts), then a dead-letter topic with an alert (OP-004) and a replay tool. Handle business outcomes such as card_declined as saga states (PaymentFailed, DC-003), not as exceptions.",
+      "pattern": "retry-topic",
+      "applies_when": "The consumers are business-critical: they capture money and credit driver earnings.",
+      "effort": "small"
+    },
+    {
+      "id": "MQ-002",
+      "lens": "messaging",
+      "title": "Capture consumer's offset policy is unspecified, and committing before the Stripe capture lands loses fares",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Trip completion" }
+      ],
+      "evidence": "\"payment-service consumes it and captures the final fare.\" No delivery guarantee or offset handling is stated, and the stack is not chosen: the plain Kafka client defaults to enable.auto.commit=true, while Spring Kafka defaults to false.",
+      "failure_scenario": "payment-service uses auto-commit, or hands the Stripe call to an async executor so the listener returns quickly. The offset is committed, then the pod is OOM-killed or rolled before the capture completes. The event is never redelivered, the fare is never captured, and the pre-auth expires. Graded medium, down from high, because the outcome depends on an implementation choice the brief has not yet made.",
+      "recommendation": "Write the contract down now: auto-commit off, processing on the listener thread, and the offset committed only after the Stripe capture and its local record commit. Pair this with the idempotent consumer (DC-005), so redelivery is safe.",
+      "pattern": "manual-ack-after-processing",
+      "applies_when": "Losing one message means one uncollected fare.",
+      "effort": "small"
+    },
+    {
+      "id": "MQ-003",
+      "lens": "messaging",
+      "title": "TripCompleted has no schema or versioning, though its producer and consumers deploy independently",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Trip completion" },
+        { "file": "project-brief.md", "section": "Targets" }
+      ],
+      "evidence": "\"Team: 4 squads of about 6 engineers, each owning two services and shipping independently.\" TripCompleted is consumed by payment, receipts and earnings, and the brief mentions no schema, version field or registry.",
+      "failure_scenario": "The booking squad renames `fare` to `finalFareCents`, or changes its type, and deploys. payment-service, owned by another squad, fails to deserialize every new event, and captures stop until a coordinated fix ships. Separately, a thin event (just a rideId) makes consumers re-read the fare from the shared tables. If the fare is adjusted between completion and consumption, capture and earnings use different amounts.",
+      "recommendation": "Define TripCompleted as a public, versioned contract (Avro, Protobuf or JSON Schema in a registry, with backward-compatibility checks in CI), separate from internal entities. Make it carry what consumers need: eventId, schemaVersion, rideId, riderId, driverId, finalFareCents, currency, paymentIntentId, completedAt.",
+      "pattern": "schema-registry",
+      "applies_when": "The producer and its three consumers belong to different squads that deploy independently.",
+      "effort": "medium"
+    },
+    {
+      "id": "MQ-004",
+      "lens": "messaging",
+      "title": "No partition key for ride events; key by rideId before adding cancel or fare-adjust events",
+      "severity": "low",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Trip completion" }
+      ],
+      "evidence": "\"publishes a `TripCompleted` event to Kafka right after the database commit.\" No key or partitioning is stated, and TripCompleted is today the only ride event.",
+      "failure_scenario": "With one event per ride today, order does not matter. Once the saga in DC-003 adds TripCancelled, FareAdjusted or PaymentFailed with a null key, a FareAdjusted can be consumed on another partition before its TripCompleted, and capture uses the wrong amount.",
+      "recommendation": "Key every ride event by rideId, and make handlers state-guarded so they reject transitions that do not follow from the current state.",
+      "pattern": "partition-by-aggregate-key",
+      "applies_when": "More than one event type per ride is published, which the saga design will introduce.",
+      "effort": "small"
+    },
+    {
+      "id": "PS-001",
+      "lens": "persistence",
+      "title": "No connection budget for 8 services on one primary, with booking holding connections across remote calls",
+      "severity": "high",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Data" },
+        { "file": "project-brief.md", "section": "Booking flow" }
+      ],
+      "evidence": "\"all eight services connect to one shared PostgreSQL cluster (one primary, one read replica)\" and \"All of steps 2–6 run inside one database transaction in booking-service\".",
+      "failure_scenario": "Postgres defaults to max_connections=100. Eight services x 2-3 replicas x HikariCP's default pool of 10 requests 160-240 connections, and location-service needs dozens of its own to sustain 7,500 commits/s. New pods added during a Friday surge cannot open their pools and fail to start. On top of that, booking-service holds a connection idle in transaction through Stripe, matching and push: ~17 connections normally, ~170 when Stripe slows (DC-001). location-service, payment captures and driver-service then all hit connection timeouts, so one slow dependency becomes a platform-wide outage.",
+      "recommendation": "Write down a connection budget: the sum over services of replicas x pool size, kept below max_connections minus headroom. Put PgBouncer in transaction mode in front of the primary. Give each service its own DB role with a CONNECTION LIMIT, so one service cannot starve the rest. Set idle_in_transaction_session_timeout and statement_timeout. The transaction-boundary fix itself is DC-001.",
+      "pattern": "connection-pool-sizing",
+      "applies_when": "Several independently scaled services share one Postgres primary, and one of them holds long transactions.",
+      "effort": "medium"
+    },
+    {
+      "id": "PS-002",
+      "lens": "persistence",
+      "title": "Matching sorts the whole hot `drivers` table by a computed distance",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Live location" }
+      ],
+      "evidence": "\"matching-service also queries this table to find nearby drivers (`ORDER BY` distance computed in SQL).\"",
+      "failure_scenario": "An ORDER BY over a computed distance cannot use a B-tree index. Every match scans and sorts every driver in every city (15k rows, growing to 50k), plus the dead tuples the 7,500/s updates leave behind, and does it again on retries. Adding a plain lat/lng index to speed it up disables HOT updates on the ping path, which makes SC-002 worse. Matching also keeps its in-memory map, so 'available nearby' has two sources of truth.",
+      "recommendation": "Use a bounded geo query against the separate location store: Redis GEOSEARCH within a radius per city with COUNT k, or a PostGIS geography column with a GiST index and WHERE city = ? AND available ORDER BY geom <-> :point LIMIT k (a KNN search), on a table separate from `drivers`. Always apply a radius and a LIMIT, and keep one source of truth (SC-001).",
+      "pattern": "add-index",
+      "applies_when": "Matching runs on every booking, over a table that grows with the fleet and is updated thousands of times a second.",
+      "effort": "medium"
+    },
+    {
+      "id": "PS-003",
+      "lens": "persistence",
+      "title": "Shared schema has no migration ownership and no lock-safe DDL rule across 4 squads",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Data" },
+        { "file": "project-brief.md", "section": "Targets" }
+      ],
+      "evidence": "\"with a single `ridenow` schema. Services can join across each other's tables when they need data\" and \"each owning two services and shipping independently.\" No migration tooling or table ownership is mentioned.",
+      "failure_scenario": "A squad ships ALTER TABLE drivers (a column with a volatile default, a type change, or an index built without CONCURRENTLY). The ACCESS EXCLUSIVE lock waits behind booking's long transactions, and the 7,500/s location updates and matching queries queue behind the lock. `drivers` freezes for seconds to minutes and ride requests fail. With no single owner per table, several services' migration histories compete over one schema. The cross-squad breakage from renames is covered by SB-001.",
+      "recommendation": "Give every table exactly one owning service that alone migrates it, with versioned migrations (Flyway or Liquibase, one history per owner). Use expand-contract for any column another service reads. Run migrations with lock_timeout (2-5 s) and statement_timeout, build indexes CONCURRENTLY, and add a CI check that rejects destructive DDL in the same release as the code change.",
+      "pattern": "expand-contract-migration",
+      "applies_when": "Several squads deploy independently against one schema that contains a hot table under constant writes.",
+      "effort": "medium"
+    },
+    {
+      "id": "PS-004",
+      "lens": "persistence",
+      "title": "Ride, notification and payment tables grow with every ride, with no partitioning or retention",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Targets" },
+        { "file": "project-brief.md", "section": "Data" }
+      ],
+      "evidence": "\"Launch: 15,000 active drivers at peak, 120,000 rides per day.\" and \"Year two: 50,000 active drivers, 400,000 rides per day\", all in \"one shared PostgreSQL cluster\".",
+      "failure_scenario": "Rides add ~44M rows a year at launch and ~146M a year in year two. Each ride also adds several notification rows, payment attempts, receipts and earnings rows on the same shared primary, with no partitioning or retention. Queries for active rides scan an ever-larger table unless they have a partial index, and vacuum, backup and restore times grow every month, which lengthens recovery against a 99.95% target.",
+      "recommendation": "Partition rides, notifications and payment logs by month (for example with pg_partman). Add a partial index on the active ride states. Set retention for notifications (for example 90 days) and archive completed rides to a warehouse.",
+      "pattern": "data-retention",
+      "applies_when": "Several tables gain one or more rows per ride, at 120k-400k rides a day.",
+      "effort": "medium"
+    },
+    {
+      "id": "OP-001",
+      "lens": "operability",
+      "title": "Deploys cut in-flight bookings that hold Stripe pre-auths and open transactions",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Booking flow" },
+        { "file": "project-brief.md", "section": "Not decided yet" }
+      ],
+      "evidence": "\"we will set a generous timeout so we don't lose bookings.\" and \"How we deploy (probably Kubernetes).\"",
+      "failure_scenario": "Four squads ship independently, so booking- and payment-service deploy often. SIGTERM arrives while POST /bookings sits between the Stripe pre-auth and the commit. The process exits, the transaction rolls back, and the card keeps a hold for a ride that does not exist. Kubernetes' default terminationGracePeriodSeconds of 30 s is shorter than a 'generous' Stripe timeout, so even a graceful drain gets cut. Graded high, lowered one level because the orchestrator is not chosen yet; DC-001 also removes most of the damage.",
+      "recommendation": "Flip readiness first, add a preStop delay, then drain. Set server.shutdown=graceful and spring.lifecycle.timeout-per-shutdown-phase, and set terminationGracePeriodSeconds above the longest allowed request, which RS-003 bounds. Stop Kafka listeners and commit offsets before exit.",
+      "pattern": "graceful-shutdown",
+      "applies_when": "Frequent, independent deploys of services whose requests span third-party payment calls.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-002",
+      "lens": "operability",
+      "title": "Probe design is undecided: matching would report ready with an empty map, and DB-checking liveness risks restart storms",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Not decided yet" }
+      ],
+      "evidence": "\"How we deploy (probably Kubernetes).\"",
+      "failure_scenario": "On Kubernetes with naive probes, a restarted matching pod is marked ready while its driver map is empty, and answers 'no driver' to every booking. If liveness probes check the database (Spring Boot's default health includes the DB), a short blip on the overloaded shared primary fails liveness for all 8 services at once. Kubernetes restarts them together, matching loses its map again, and booking pods drop in-flight transactions.",
+      "recommendation": "Liveness checks only the process. Readiness checks what the instance needs in order to serve, and matching's readiness waits for its availability index to be loaded. Add a startupProbe for slow starts. On Spring Boot, set management.endpoint.health.probes.enabled=true with explicit liveness and readiness groups.",
+      "pattern": "health-probes",
+      "applies_when": "Services run behind an orchestrator and share one database.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-003",
+      "lens": "operability",
+      "title": "No distributed tracing or correlation id across the booking and trip-completion flows",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Not decided yet" }
+      ],
+      "evidence": "\"Observability tooling.\" is listed as not decided. The booking flow spans api-gateway -> booking -> payment -> Stripe, matching and notification, and completion fans out over Kafka to payment, receipts and earnings.",
+      "failure_scenario": "A rider is charged with no ride, or a completed trip is never captured. The path crosses 5+ services owned by 4 squads, plus a Kafka fan-out. With no trace id in HTTP and Kafka headers, nobody can tell whether the failure was in booking's publish, the broker or the payment consumer, and recovery means hours of grepping logs across squads.",
+      "recommendation": "Adopt OpenTelemetry (Micrometer Tracing on Spring Boot 3) with W3C traceparent propagated through HTTP and Kafka headers, plus structured JSON logs that carry the trace id and the ride id. Log the Stripe idempotency key and PaymentIntent id next to the ride id.",
+      "pattern": "distributed-tracing",
+      "applies_when": "Money-moving flows cross several deployables owned by different squads.",
+      "effort": "small"
+    },
+    {
+      "id": "OP-004",
+      "lens": "operability",
+      "title": "The 99.95% ride-request SLO has no SLI, burn-rate alerts, or saturation and lag metrics",
+      "severity": "medium",
+      "confidence": "medium",
+      "locations": [
+        { "file": "project-brief.md", "section": "Targets" },
+        { "file": "project-brief.md", "section": "Not decided yet" }
+      ],
+      "evidence": "\"Availability target for requesting a ride: 99.95%.\" and \"Observability tooling.\" (not decided)",
+      "failure_scenario": "The error budget is ~22 minutes a month. The likely failures are all silent until riders complain: an empty matching map ('no drivers'), TripCompleted consumer lag that delays captures, replica lag, autovacuum falling behind on `drivers`, and connection saturation on the shared primary. By the time anyone notices, the month's budget is gone.",
+      "recommendation": "Define an SLI on POST /bookings (success rate and latency) with multi-window burn-rate alerts. Add RED metrics per endpoint and per dependency (Stripe, push/SMS, matching). Track Postgres connections, replication lag and dead tuples on hot tables. Alert on consumer-group lag and DLT depth for each TripCompleted consumer, and page when a city's available-driver count drops to 0.",
+      "pattern": "metrics-and-alerts",
+      "applies_when": "A stated availability SLO, several services on one database, and asynchronous consumers that move money.",
+      "effort": "medium"
+    }
+  ],
+  "strengths": [
+    "Stripe pre-authorization at booking with capture at trip end is the right card model for a fare that is only known when the trip ends. Keep it, and add void and re-authorize paths (DC-003).",
+    "booking-service is named as the single owner of the ride lifecycle, with explicit states. It is the natural home for the saga orchestrator; extend the state set rather than spread ownership.",
+    "Post-trip work (capture, receipts, earnings) is already asynchronous through Kafka, so slow consumers do not hold up the driver ending the trip. Keep that decoupling; it needs an outbox (DC-002), not a sync replacement.",
+    "There is a single api-gateway for routing and auth, so internal services can stay off the public network and cross-cutting policy (rate limits, SC-005) has one home.",
+    "The brief states concrete scale, peak factor, availability and team targets, which made every severity in this review gradable. The 4-squad, independent-shipping structure does justify separate services, so this review does not recommend a monolith.",
+    "A read replica is already planned, and the brief accepts seconds of staleness for location, which gives SC-003 an easy first step."
+  ]
+}
