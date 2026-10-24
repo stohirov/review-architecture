@@ -1,0 +1,21 @@
+{
+  "name": "review-architecture",
+  "version": "0.1.0",
+  "description": "Architecture review and recommendation skill: profiles a codebase or a project description, fans out parallel lens agents, and reports system-design mistakes with proportional fixes.",
+  "author": {
+    "name": "stohirov",
+    "url": "https://github.com/stohirov"
+  },
+  "repository": "https://github.com/stohirov/review-architecture",
+  "license": "MIT",
+  "keywords": [
+    "architecture",
+    "system-design",
+    "microservices",
+    "scalability",
+    "code-review"
+  ],
+  "skills": [
+    "./skills/review-architecture"
+  ]
+}

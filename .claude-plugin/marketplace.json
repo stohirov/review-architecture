@@ -1,0 +1,21 @@
+{
+  "name": "review-architecture",
+  "owner": {
+    "name": "stohirov",
+    "url": "https://github.com/stohirov"
+  },
+  "description": "Architecture review and recommendation skill as an installable Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "review-architecture",
+      "source": "./",
+      "description": "Reviews a codebase or project description for system-design mistakes (scalability, data consistency, resilience, service boundaries, messaging) and recommends proportional fixes.",
+      "category": "engineering",
+      "keywords": [
+        "architecture",
+        "system-design",
+        "microservices"
+      ]
+    }
+  ]
+}
