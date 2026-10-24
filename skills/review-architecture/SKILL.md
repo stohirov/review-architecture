@@ -57,7 +57,7 @@ Start the lens agents **all in a single message** so they run in parallel. Build
 - **Medium**: one agent per lens.
 - **Large** (more than about 6 deployables or 400 source files): one agent per lens, with `data-consistency` and `resilience` also split per group of services. Keep the total at about 10 agents or fewer.
 
-Keep working notes (the profile, raw candidate lists) in a temporary directory unique to this run, never in the project. Wait for every agent before step 5, and don't redo their work while they run.
+Keep working notes (the profile, raw candidate lists) in a temporary directory unique to this run, never in the project. Wait for every agent before step 5, and don't redo their work while they run. If you are a subagent yourself, results may arrive as messages after your turn; stay running until every lens has reported.
 
 If some agents are refused, for example by a concurrency limit, launch them as earlier ones finish. Run a lens yourself only if it still cannot launch, and say so in the report's scope line. If the platform has no subagent tool, run each lens yourself in turn with the same brief.
 
@@ -75,7 +75,7 @@ Lens agents each see one lens and one slice of code. You see everything. For eve
 
 Assign ids by lens prefix and sequence: `SC` scalability, `DC` data-consistency, `RS` resilience, `SB` service-boundaries, `MQ` messaging, `PS` persistence, `OP` operability (for example `DC-001`).
 
-Then write `strengths`: the patterns that are already done right, taken from rules the ledgers mark `clear` because a mitigation exists.
+Then write `strengths`: the patterns that are already done right. Take them from rules the ledgers mark `clear` because a mitigation exists, and from sound design choices you saw yourself (in design mode, choices the brief makes well). A risk that is merely absent is not a strength. Record every candidate you dropped in `dropped`, with the reason.
 
 Done when you have personally re-read the evidence for every surviving critical or high finding, and every candidate is kept, merged or dropped.
 
@@ -87,7 +87,7 @@ Write two files:
 
 In codebase and hybrid mode they go in the project root; in design mode, the current directory. Use another location if the user names one.
 
-Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json --report <path>/architecture-review.md`, and fix both files until it exits 0. The `--report` check confirms the report's sections, that each finding has its heading under its own severity, and that every non-info finding is on the roadmap.
+Run `node <skill-dir>/scripts/validate-findings.mjs <path>/architecture-findings.json --report <path>/architecture-review.md`, adding `--brief <brief file>` in design mode, and fix the files until it exits 0. The `--report` check confirms the report's sections, that each finding has its heading under its own severity, and that every non-info finding is on the roadmap. `--brief` confirms that every design-mode `section` is a real heading in the brief.
 
 Done when the validator passes with `--report`.
 

@@ -9,7 +9,7 @@ You are the **<lens or lenses>** lens of an architecture review. You are read-on
 - Mode: <codebase | design | hybrid>
 - Target: <absolute path to the repo root, or to the brief file; for a brief given only in conversation, the brief text follows the profile>
 - Lens checklists: <absolute path(s) to references/lenses/<lens>.md>
-- Lenses running in parallel: <every lens in profile.lenses_run>
+- Lenses running in parallel: <every lens in profile.lenses_run>; the lenses assigned to you are yours, and the rest belong to other agents
 - Scope: <"whole repo", or the services this agent covers when the lens is split>
 - Read only: the target and the checklists above <plus any limit the user set>
 
@@ -52,7 +52,9 @@ Severity is **impact × trigger**. The damaging impacts are: data lost or corrup
   - Examples: every message fails to deserialize; a retried POST double-charges whenever the callee is slow; carts in instance memory behind a load balancer.
 - **high**: the same impacts behind a less frequent trigger: a crash in the narrow window between two steps, a broker redelivery after a rebalance, a dependency outage. Also: wrong behaviour at the project's stated scale.
   - Examples: a crash between commit and publish loses the event; a redelivered message is applied twice; a hung dependency drains the pool.
-- **medium**: degrades performance or operability now, or breaks at roughly 10× today's load.
+
+Critical is meant to be rare. Before you grade critical, name the trigger and check that it fires on the normal path or on a frequent routine event. A failure that needs a request in flight at the wrong moment, or a rare event, is high.
+- **medium**: degrades performance or operability now, breaks at roughly 10× today's load, or degrades as data accumulates at today's load (a table without an index, a log without retention).
 - **low**: cheap hygiene with a real but small payoff.
 - **info**: an observation with no action needed.
 

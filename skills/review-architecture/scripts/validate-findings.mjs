@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Validates architecture-findings.json against ../findings-schema.json.
-// Usage: node validate-findings.mjs <path-to-findings.json> [--report <architecture-review.md>]
+// Usage: node validate-findings.mjs <path-to-findings.json> [--report <architecture-review.md>] [--brief <brief.md>]
 // Interprets the subset of JSON Schema the schema uses, then applies
 // cross-field checks that are clearer in code.
 
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCHEMA_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "findings-schema.json");
@@ -106,6 +106,9 @@ function crossFieldChecks(doc, errors) {
       if (f?.lens && !lensesRun.includes(f.lens)) {
         errors.push(`$.findings[${i}].lens: "${f.lens}" is not in profile.lenses_run`);
       }
+      (Array.isArray(f?.also_reported_by) ? f.also_reported_by : []).forEach((lens) => {
+        if (!lensesRun.includes(lens)) errors.push(`$.findings[${i}].also_reported_by: "${lens}" is not in profile.lenses_run`);
+      });
     });
   }
 }
@@ -120,6 +123,19 @@ function normalizeHeading(text) {
   return text.trim().toLowerCase().replace(/[‘’]/g, "'");
 }
 
+// Yields each line with its ATX heading, if any; lines inside fenced code blocks are never headings.
+function* markdownLines(markdown) {
+  let fence = null;
+  for (const line of markdown.split(/\r?\n/u)) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (marker && (fence === null || (marker[0] === fence[0] && marker.length >= fence.length))) {
+      fence = fence === null ? marker : null;
+    }
+    const m = fence === null && !marker ? /^(#{1,6})\s+(.*?)\s*#*\s*$/u.exec(line) : null;
+    yield { line, heading: m ? { level: m[1].length, text: m[2] } : null };
+  }
+}
+
 // Splits the report into "## " sections and records which "### " severity group
 // each "#### <id>" finding heading sits under (REPORT.md defines the layout).
 function parseReport(markdown) {
@@ -127,23 +143,16 @@ function parseReport(markdown) {
   const findingHeadings = new Map();
   let h2 = null;
   let h3 = null;
-  let fence = null;
-  for (const line of markdown.split(/\r?\n/u)) {
-    const marker = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
-    if (marker && (fence === null || (marker[0] === fence[0] && marker.length >= fence.length))) {
-      fence = fence === null ? marker : null;
-    }
-    const m = fence === null && !marker ? /^(#{1,6})\s+(.*)$/u.exec(line) : null;
-    if (m) {
-      const level = m[1].length;
-      if (level <= 2) {
-        h2 = level === 2 ? normalizeHeading(m[2]) : null;
+  for (const { line, heading } of markdownLines(markdown)) {
+    if (heading) {
+      if (heading.level <= 2) {
+        h2 = heading.level === 2 ? normalizeHeading(heading.text) : null;
         h3 = null;
         if (h2 !== null) sections.set(h2, sections.get(h2) ?? []);
-      } else if (level === 3) {
-        h3 = normalizeHeading(m[2]);
-      } else if (level === 4) {
-        const id = /^([A-Z]{2,5}-[0-9]{3})\b/u.exec(m[2].trim())?.[1];
+      } else if (heading.level === 3) {
+        h3 = normalizeHeading(heading.text);
+      } else if (heading.level === 4) {
+        const id = /^([A-Z]{2,5}-[0-9]{3})\b/u.exec(heading.text.trim())?.[1];
         if (id && !findingHeadings.has(id)) findingHeadings.set(id, { h2, h3 });
       }
     }
@@ -173,6 +182,21 @@ export function checkReport(doc, markdown) {
   return errors;
 }
 
+// Design mode: every location that cites the brief must name one of its real headings.
+export function checkBrief(doc, briefMarkdown, briefName) {
+  if (!Array.isArray(doc?.findings)) return [];
+  const headings = new Set();
+  for (const { heading } of markdownLines(briefMarkdown)) if (heading) headings.add(normalizeHeading(heading.text));
+  const errors = [];
+  for (const f of doc.findings) {
+    for (const loc of Array.isArray(f?.locations) ? f.locations : []) {
+      if (typeof loc?.file !== "string" || basename(loc.file) !== briefName || typeof loc.section !== "string") continue;
+      if (!headings.has(normalizeHeading(loc.section))) errors.push(`brief: ${f.id} cites section "${loc.section}", which is not a heading in ${briefName}`);
+    }
+  }
+  return errors;
+}
+
 export function validate(doc, schema = loadSchema()) {
   const errors = [];
   checkNode(doc, schema, "$", errors);
@@ -182,11 +206,16 @@ export function validate(doc, schema = loadSchema()) {
 
 function main(argv) {
   const args = argv.slice(2);
-  const reportIdx = args.indexOf("--report");
-  const reportPath = reportIdx >= 0 ? args.splice(reportIdx, 2)[1] : undefined;
+  const option = (name) => {
+    const idx = args.indexOf(name);
+    if (idx < 0) return undefined;
+    return args.splice(idx, 2)[1] ?? "";
+  };
+  const reportPath = option("--report");
+  const briefPath = option("--brief");
   const file = args[0];
-  if (!file || args.length !== 1 || (reportIdx >= 0 && !reportPath)) {
-    console.error("usage: validate-findings.mjs <path-to-findings.json> [--report <architecture-review.md>]");
+  if (!file || args.length !== 1 || reportPath === "" || briefPath === "") {
+    console.error("usage: validate-findings.mjs <path-to-findings.json> [--report <architecture-review.md>] [--brief <brief.md>]");
     return 2;
   }
   let doc;
@@ -204,12 +233,20 @@ function main(argv) {
       errors.push(`${reportPath}: ${err.message}`);
     }
   }
+  if (briefPath) {
+    try {
+      errors.push(...checkBrief(doc, readFileSync(briefPath, "utf8"), basename(briefPath)));
+    } catch (err) {
+      errors.push(`${briefPath}: ${err.message}`);
+    }
+  }
   if (errors.length) {
     for (const e of errors) console.error(e);
     console.error(`${file}: ${errors.length} error(s)`);
     return 1;
   }
-  console.log(`${file}: valid (${doc.findings.length} finding(s))${reportPath ? `; report layout ok in ${reportPath}` : ""}`);
+  const checked = [reportPath && `report layout ok in ${reportPath}`, briefPath && `brief sections ok in ${briefPath}`].filter(Boolean);
+  console.log(`${file}: valid (${doc.findings.length} finding(s))${checked.map((c) => `; ${c}`).join("")}`);
   return 0;
 }
 

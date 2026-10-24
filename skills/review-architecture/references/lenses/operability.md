@@ -27,7 +27,7 @@ Security is out of scope beyond architecture-level gaps (secrets in source, no a
 - **Signals**: URLs, hostnames, credentials or API keys hardcoded in Java or committed in `application.yml`/`.properties`; per-environment builds; other services' addresses as literals.
 - **Why it fails**: you cannot promote one artifact through environments, rotating a secret needs a rebuild, and secrets leak through the repo.
 - **Fix**: `externalized-config` (env vars, a config server, k8s ConfigMaps) and a `secrets-manager` (Vault, cloud secret stores, k8s Secrets); `immutable-artifacts`.
-- **Recommend when**: always for secrets (high); medium for other environment-specific values.
+- **Recommend when**: always for secrets: medium, or high when the secret grants production access to money or customer data. Medium or low for other environment-specific values.
 
 ### op.no-tracing · Requests cannot be followed across services
 
@@ -48,7 +48,7 @@ Security is out of scope beyond architecture-level gaps (secrets in source, no a
 - **Signals**: clients call several services directly; every service implements its own authentication, CORS and rate limiting; no gateway or ingress in manifests.
 - **Why it fails**: cross-cutting policy drifts between services, clients are coupled to internal topology, and internal services are exposed.
 - **Fix**: an `api-gateway` or ingress handling routing, auth and rate limits, with internal services kept off the public network.
-- **Recommend when**: several services are reached by external clients.
+- **Recommend when**: several services are reached by external clients, or an endpoint trusts caller identity from the request body or a header. Grade a missing auth boundary by what an unauthenticated caller can do. If a gateway outside the repo may enforce it, follow the unseen-infrastructure rule in the brief. Deeper security issues (token validation, injection, crypto) go to a security review.
 
 ### op.no-resource-policy · Pods without resources or disruption limits
 

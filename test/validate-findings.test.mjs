@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validate, checkReport } from "../skills/review-architecture/scripts/validate-findings.mjs";
+import { validate, checkReport, checkBrief } from "../skills/review-architecture/scripts/validate-findings.mjs";
 
 const SCRIPT = new URL("../skills/review-architecture/scripts/validate-findings.mjs", import.meta.url).pathname;
 
@@ -192,4 +192,31 @@ test("CLI --report fails when the layout is wrong", () => {
   assert.throws(() => execFileSync("node", [SCRIPT, json, "--report", md], { stdio: "pipe" }), (err) => err.status === 1);
   writeFileSync(md, report());
   assert.match(execFileSync("node", [SCRIPT, json, "--report", md], { encoding: "utf8" }), /report layout ok/);
+});
+
+test("checkBrief requires design sections to be real brief headings", () => {
+  const brief = "# RideNow\n## Booking flow\nText.\n```\n## Not a heading\n```\n## Live location ##\n";
+  const d = doc({
+    mode: "design",
+    findings: [
+      finding({ locations: [{ file: "project-brief.md", section: "booking flow" }] }),
+      finding({ id: "DC-002", locations: [{ file: "docs/project-brief.md", section: "Live location" }, { file: "conversation", section: "anything" }] }),
+      finding({ id: "DC-003", locations: [{ file: "project-brief.md", section: "Booking flow (step 4)" }] }),
+      finding({ id: "DC-004", locations: [{ file: "project-brief.md", section: "Not a heading" }] }),
+    ],
+  });
+  assert.deepEqual(checkBrief(d, brief, "project-brief.md"), [
+    'brief: DC-003 cites section "Booking flow (step 4)", which is not a heading in project-brief.md',
+    'brief: DC-004 cites section "Not a heading", which is not a heading in project-brief.md',
+  ]);
+});
+
+test("also_reported_by lenses must have run", () => {
+  const errors = validate(doc({ findings: [finding({ also_reported_by: ["resilience"] })] }));
+  assert.ok(errors.some((e) => e.includes('"resilience" is not in profile.lenses_run')));
+});
+
+test("dropped candidates are recorded as strings", () => {
+  assert.deepEqual(validate(doc({ dropped: ["persistence: CONCURRENTLY index (migration already ran)"] })), []);
+  assert.ok(validate(doc({ dropped: [""] })).some((e) => e.includes("must not be blank")));
 });

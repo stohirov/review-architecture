@@ -276,6 +276,14 @@
         "minLength": 1
       },
       "description": "Things the architecture already does well."
+    },
+    "dropped": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Candidates dropped in step 5, as '<lens>: <title> (reason)'."
     }
   }
 }
