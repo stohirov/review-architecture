@@ -1,6 +1,6 @@
 {
   "name": "review-architecture",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Architecture review and recommendation skill: profiles a codebase or a project description, fans out parallel lens agents, and reports system-design mistakes with proportional fixes.",
   "author": {
     "name": "stohirov",
