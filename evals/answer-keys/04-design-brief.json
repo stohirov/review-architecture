@@ -1,0 +1,78 @@
+{
+  "fixture": "04-design-brief",
+  "mode": "design",
+  "expected": [
+    {
+      "key": "shared-database",
+      "description": "Eight services on one shared schema with cross-service joins",
+      "lenses": ["service-boundaries"],
+      "files": ["project-brief.md"],
+      "keywords": ["shared|single.schema|database.per.service|join"],
+      "must_detect": true
+    },
+    {
+      "key": "sync-payment-in-booking",
+      "description": "Booking synchronously waits on payment-service -> Stripe pre-auth with a generous timeout",
+      "lenses": ["resilience", "data-consistency", "scalability"],
+      "files": ["project-brief.md"],
+      "keywords": ["stripe|pre.?auth|payment", "sync|timeout|chain|wait"],
+      "must_detect": true
+    },
+    {
+      "key": "remote-calls-in-tx",
+      "description": "Steps 2-6 (Stripe pre-auth, matching, notifications) run inside one DB transaction; rollback cannot undo the pre-auth or the push",
+      "lenses": ["data-consistency"],
+      "files": ["project-brief.md"],
+      "keywords": ["transaction|rollback|roll.back"],
+      "must_detect": true
+    },
+    {
+      "key": "location-write-hotspot",
+      "description": "15k-50k drivers pinging every 2s as UPDATEs on the shared Postgres primary, plus 1s rider polling and SQL distance sort",
+      "lenses": ["scalability", "persistence"],
+      "files": ["project-brief.md"],
+      "keywords": ["gps|location|ping", "write|update|poll|postgres|primary|geo"],
+      "must_detect": true
+    },
+    {
+      "key": "matching-in-memory-state",
+      "description": "matching-service holds driver availability in an in-memory map on a single instance, fed by REST callbacks",
+      "lenses": ["scalability", "resilience"],
+      "files": ["project-brief.md"],
+      "keywords": ["in.?memory|single.instance|one.instance|map"],
+      "must_detect": true
+    },
+    {
+      "key": "trip-completed-dual-write",
+      "description": "TripCompleted published to Kafka after commit with no outbox; a crash in between loses the fare capture",
+      "lenses": ["data-consistency", "messaging"],
+      "files": ["project-brief.md"],
+      "keywords": ["outbox|dual.write|after.*commit|lost"],
+      "must_detect": true
+    },
+    {
+      "key": "notification-on-critical-path",
+      "description": "Booking fails if notification-service is down",
+      "lenses": ["resilience"],
+      "files": ["project-brief.md"],
+      "keywords": ["notif"],
+      "must_detect": false
+    },
+    {
+      "key": "no-saga-booking",
+      "description": "No compensation when matching fails after pre-auth (release the hold), or capture fails after trip",
+      "lenses": ["data-consistency"],
+      "files": ["project-brief.md"],
+      "keywords": ["saga|compensat|release|void"],
+      "must_detect": false
+    },
+    {
+      "key": "payment-consumer-idempotency",
+      "description": "Fare capture consumer must be idempotent; redelivery double-charges",
+      "lenses": ["data-consistency", "messaging"],
+      "files": ["project-brief.md"],
+      "keywords": ["idempoten|duplicate|twice|double"],
+      "must_detect": false
+    }
+  ]
+}
