@@ -13,7 +13,8 @@ Everything below is relative to this skill's directory (the folder holding this 
 
 - `references/INTAKE.md`: design-mode questions
 - `references/RECON.md`: codebase profiling and the profile format
-- `references/AGENT-BRIEF.md`: the brief each lens agent receives, including the severity scale
+- `references/AGENT-BRIEF.md`: the short prompt template for each lens agent
+- `references/LENS-RULES.md`: the rules every lens agent reads: method, ownership, severity, confidence and output format
 - `references/REPORT.md`: report structure
 - `references/lenses/<lens>.md`: one checklist per lens
 - `findings-schema.json` and `scripts/validate-findings.mjs`: the output contract and its validator
@@ -70,12 +71,12 @@ Lens agents each see one lens and one slice of code. You see everything. For eve
 1. **Evidence**: open the cited location. The quoted evidence must be there: in code, at that line (correct the line number if it is off); in design mode, verbatim in the brief. Otherwise drop the candidate.
 2. **Mitigation**: search for a fix that lives elsewhere, such as a lock configured in another module, a global client timeout, an outbox relay, or a dedup table. If one exists, drop or downgrade the candidate.
 3. **Proportionality**: check `applies_when` against the profile. Drop recommendations the project's scale or shape does not justify.
-4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the ownership table in `references/AGENT-BRIEF.md`, fold the other angle into it, and list the other lens in `also_reported_by`. The merged finding takes the union of locations, and the severity and confidence that survive your own re-grade in point 5. One cause with two distinct failures that need different fixes stays as two findings.
-5. **Severity**: re-grade against the impact × trigger scale in `references/AGENT-BRIEF.md`. Critical is meant to be rare: re-check every critical against its trigger, and move narrow-window or rare-event findings to high. A critical or high finding needs medium or high confidence after your own reading.
+4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the Ownership table in `references/LENS-RULES.md`, fold the other angle into it, and list the other lens in `also_reported_by`. The merged finding takes the union of locations, and the severity and confidence that survive your own re-grade in point 5. One cause with two distinct failures that need different fixes stays as two findings.
+5. **Severity**: re-grade against the impact × trigger scale in `references/LENS-RULES.md`. Critical is meant to be rare: re-check every critical against its trigger, and move narrow-window or rare-event findings to high. A critical or high finding needs medium or high confidence after your own reading.
 
 Assign ids by lens prefix and sequence: `SC` scalability, `DC` data-consistency, `RS` resilience, `SB` service-boundaries, `MQ` messaging, `PS` persistence, `OP` operability (for example `DC-001`).
 
-Then write `strengths`: the patterns that are already done right. Take them from rules the ledgers mark `clear` because a mitigation exists, and from sound design choices you saw yourself (in design mode, choices the brief makes well). A risk that is merely absent is not a strength. Record every candidate you dropped in `dropped`, with the reason.
+Then write `strengths`: the patterns that are already done right. Take them from rules the ledgers mark `clear` because a mitigation exists, and from sound design choices you saw yourself (in design mode, choices the brief makes well). A risk that is merely absent is not a strength. Record every candidate you dropped, merged or re-graded in `triage`, with the reason.
 
 Done when you have personally re-read the evidence for every surviving critical or high finding, and every candidate is kept, merged or dropped.
 

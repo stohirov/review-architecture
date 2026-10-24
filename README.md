@@ -114,7 +114,7 @@ r3 passed, but the fixture changed after it, so a pass on the current fixture is
 
 Severity calibration changed in r4: fixture 02 went from 10 criticals (r3) to 2, with recall unchanged.
 
-Feedback from each run was used to tune the skill; see each run's `SUMMARY.md`. r1 outputs predate the current profile schema (`stated_intent` became required), so they no longer validate.
+Feedback from each run was used to tune the skill; see each run's `SUMMARY.md`. r1 and r5 outputs predate later schema changes (`stated_intent` became required after r1, and `dropped` became `triage` after r5), so they no longer validate.
 
 ## Development
 

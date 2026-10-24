@@ -216,9 +216,25 @@ test("also_reported_by lenses must have run", () => {
   assert.ok(errors.some((e) => e.includes('"resilience" is not in profile.lenses_run')));
 });
 
-test("dropped candidates are recorded as strings", () => {
-  assert.deepEqual(validate(doc({ dropped: ["persistence: CONCURRENTLY index (migration already ran)"] })), []);
-  assert.ok(validate(doc({ dropped: [""] })).some((e) => e.includes("must not be blank")));
+test("triage records drops, merges and re-grades", () => {
+  const triage = [
+    { action: "dropped", candidate: "persistence: CONCURRENTLY index", reason: "migration already ran" },
+    { action: "merged", candidate: "resilience: SMTP on critical path", reason: "same root cause", finding: "DC-001" },
+    { action: "regraded", candidate: "data-consistency: HTTP in tx", reason: "narrow window", finding: "DC-001", from: "critical", to: "high" },
+  ];
+  assert.deepEqual(validate(doc({ triage })), []);
+  const errors = validate(doc({
+    triage: [
+      { action: "dropped", candidate: "a: b", reason: "c", finding: "DC-001" },
+      { action: "merged", candidate: "a: b", reason: "c", finding: "DC-009" },
+      { action: "regraded", candidate: "a: b", reason: "c", finding: "DC-001", from: "high", to: "high" },
+      { action: "ignored", candidate: "a: b", reason: "c" },
+    ],
+  }));
+  assert.ok(errors.some((e) => e.includes("a dropped candidate names no finding")));
+  assert.ok(errors.some((e) => e.includes("must name an existing finding")));
+  assert.ok(errors.some((e) => e.includes("need different from and to severities")));
+  assert.ok(errors.some((e) => e.includes('"ignored" is not one of')));
 });
 
 test("checkBrief requires quoted evidence to be verbatim in the brief", () => {

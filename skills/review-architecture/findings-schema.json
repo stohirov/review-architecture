@@ -277,13 +277,61 @@
       },
       "description": "Things the architecture already does well."
     },
-    "dropped": {
+    "triage": {
       "type": "array",
+      "description": "What step 5 did to the lens candidates. Every dropped, merged or re-graded candidate gets one entry.",
       "items": {
-        "type": "string",
-        "minLength": 1
-      },
-      "description": "Candidates dropped in step 5, as '<lens>: <title> (reason)'."
+        "type": "object",
+        "required": [
+          "action",
+          "candidate",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "dropped",
+              "merged",
+              "regraded"
+            ]
+          },
+          "candidate": {
+            "type": "string",
+            "minLength": 1,
+            "description": "'<lens>: <candidate title>' as the lens agent returned it."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "finding": {
+            "type": "string",
+            "pattern": "^[A-Z]{2,5}-[0-9]{3}$",
+            "description": "merged: the finding it was folded into; regraded: the finding it became. Absent for dropped."
+          },
+          "from": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
+            "description": "regraded: the lens agent's severity."
+          },
+          "to": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
+            "description": "regraded: the severity after step 5."
+          }
+        }
+      }
     }
   }
 }

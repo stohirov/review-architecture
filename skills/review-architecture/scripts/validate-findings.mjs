@@ -100,6 +100,19 @@ function crossFieldChecks(doc, errors) {
       });
     }
   });
+  const ids = new Set(doc.findings.map((f) => f?.id));
+  (Array.isArray(doc.triage) ? doc.triage : []).forEach((t, i) => {
+    const at = `$.triage[${i}]`;
+    if (t?.action === "dropped") {
+      if (t.finding !== undefined) errors.push(`${at}: a dropped candidate names no finding`);
+      return;
+    }
+    if (t?.action !== "merged" && t?.action !== "regraded") return;
+    if (!ids.has(t.finding)) errors.push(`${at}.finding: ${t.action} candidates must name an existing finding`);
+    if (t.action === "regraded" && (t.from === undefined || t.to === undefined || t.from === t.to)) {
+      errors.push(`${at}: regraded candidates need different from and to severities`);
+    }
+  });
   const lensesRun = doc.profile?.lenses_run;
   if (Array.isArray(lensesRun)) {
     doc.findings.forEach((f, i) => {
