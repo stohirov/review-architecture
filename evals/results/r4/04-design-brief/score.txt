@@ -1,0 +1,19 @@
+04-design-brief: PASS
+  findings: 27
+  recall: 6/6 (100%)
+    + shared-database <- SB-001, SB-002
+    + sync-payment-in-booking <- DC-001, DC-003, RS-001, RS-002, RS-003, RS-004
+    + remote-calls-in-tx <- DC-001, DC-002, DC-005
+    + location-write-hotspot <- SC-001, SC-002, SC-003, PS-002, SC-005
+    + matching-in-memory-state <- SC-001, RS-002, SC-002, SC-003
+    + trip-completed-dual-write <- DC-001, DC-002, DC-003, DC-005, DC-006, MQ-001
+  bonus: notification-on-critical-path, no-saga-booking, payment-consumer-idempotency
+  not in answer key (review by hand):
+    ? PS-001 [high] No connection budget for eight services sharing one primary while booking transactions hold connections across Stripe calls
+    ? SC-004 [medium] `TripCompleted` consumers make blocking Stripe captures, with partition count and consumer concurrency unstated
+    ? MQ-002 [medium] `TripCompleted` contract crosses independently shipping squads with no schema, version or named consumer owner
+    ? OP-001 [medium] No probe design: matching needs readiness on its state, and DB-checking liveness would restart all eight services on a shared-DB blip
+    ? OP-002 [medium] No graceful-shutdown design for long booking requests and in-flight Stripe captures
+    ? OP-003 [medium] No distributed tracing or correlation id across the sync booking chain and the `TripCompleted` fan-out
+    ? OP-004 [medium] No SLO metrics or alerts for the 99.95% target, consumer lag, DLT depth, Stripe latency or primary saturation
+    ? PS-003 [low] No retention or partitioning plan for rides and the outbox and dedupe tables (44M to 146M ride rows a year)

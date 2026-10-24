@@ -1,0 +1,27 @@
+03-microservices-healthy: FAIL
+  findings: 21
+  recall: 0/0 (100%)
+  control: above max severity: OP-001
+  control warning (check by hand): names an implemented pattern: DC-001, RS-001, OP-004, MQ-001, DC-002, SC-003, OP-007
+  not in answer key (review by hand):
+    ? OP-001 [high] No auth boundary: `POST /orders` and `GET /orders` trust a client-supplied `customerId`, which is the customer the PSP charges
+    ? DC-001 [medium] A definitive PSP rejection (HTTP 4xx) never produces `PaymentFailed`: it is retried ~27 times, dead-lettered, and the order stays `STOCK_RESERVED` with stock held
+    ? RS-001 [medium] A PSP outage longer than ~3 minutes dead-letters `ChargePayment` commands, because an open circuit is retried and dead-lettered like a poison message
+    ? SB-001 [medium] `price_list` lives in order-service's database and Flyway, but an external pricing back office writes it directly
+    ? SC-001 [medium] Single-threaded outbox relay sends and commits one record at a time, capping each service at roughly 65–100 messages/s regardless of replicas
+    ? SC-002 [medium] Saga watchdog cancels at most 100 orders per minute, below the stated 300–900 orders/minute peak
+    ? OP-002 [medium] No outbox backlog or relay-health metric: a stalled relay surfaces only as mass watchdog cancellations
+    ? OP-003 [medium] Lazily registered `kafka.dlt.records` counter hides the first DLT record per pod and topic from rate-based alerts
+    ? OP-004 [medium] Trace context is not carried through the outbox or Kafka, so every saga hop starts a separate trace
+    ? OP-005 [medium] Deployments declare no resource requests or limits, no PodDisruptionBudget and no topology spread
+    ? PS-001 [medium] Hikari pool of 10 per pod is not sized against Postgres `max_connections` for 9 pods plus deploy surge
+    ? RS-002 [low] Outbox relay shares Spring Boot's default single-thread `TaskScheduler` with the watchdog and the nightly purges
+    ? MQ-001 [low] Deterministic consumer errors are retried with blocking backoff for ~3 minutes, stalling the partition, because only `JsonProcessingException` is not-retryable
+    ? MQ-002 [low] payment-service and order-service silently drop unknown `message-type` values and commit the offset
+    ? DC-002 [low] `POST /orders` check-then-insert returns 500 on a concurrent retry, and the `Idempotency-Key` is not bound to the request body
+    ? SC-003 [low] Outbox relay `lockAtMostFor = PT30S` is shorter than its worst-case run, so two replicas can relay at once
+    ? PS-002 [low] Placing an order runs one price query and one IDENTITY insert per line, up to ~100 round trips
+    ? PS-003 [low] Outbox purge deletes a whole day of week-old sent rows in one transaction
+    ? OP-006 [low] No startupProbe: Flyway and KafkaAdmin run before the liveness endpoint exists, with ~30 s before kubelet restarts the pod
+    ? OP-007 [low] No preStop delay: order-service stops accepting connections before endpoints stop routing to it
+    ? OP-008 [low] docker-compose stack cannot run as committed: `DB_USER`, `DB_PASSWORD` and `PSP_API_KEY` are missing, and topics need 3 replicas on one broker

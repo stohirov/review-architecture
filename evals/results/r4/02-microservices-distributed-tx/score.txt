@@ -1,0 +1,25 @@
+02-microservices-distributed-tx: PASS
+  findings: 29
+  recall: 11/11 (100%)
+    + http-in-tx-order <- DC-002
+    + http-in-tx-payment <- DC-003
+    + dual-write-no-outbox <- DC-002, DC-004
+    + no-saga-compensation <- DC-003, DC-005
+    + non-idempotent-consumer <- DC-004, DC-005, DC-006
+    + auto-commit-offsets <- MQ-001, MQ-002, MQ-004
+    + no-dlq <- MQ-002
+    + no-timeouts <- RS-001, RS-002, RS-003
+    + shared-database <- SB-001
+    + unsafe-retries <- DC-001, RS-003
+    + sync-call-chain <- RS-005
+  bonus: stock-lost-update, no-circuit-breaker, no-tracing, ddl-auto-update
+  not in answer key (review by hand):
+    ? DC-008 [high] POST `/orders` takes unit price and quantity from the client unvalidated, so callers set their own charge and can inflate stock
+    ? DC-009 [high] POST `/orders` has no idempotency key, so a client or gateway retry creates a second order and a second charge
+    ? MQ-003 [medium] `OrderPaidEvent` is shared between independently deployed teams only as a duplicated class, with no version field or schema
+    ? RS-004 [medium] No circuit breaker around payment-service or the PSP on the order flow
+    ? PS-003 [medium] `order_items.order_id` has no index, but inventory-service queries it on every `OrderPaidEvent`
+    ? SC-001 [medium] The `order-events` partition count is never declared, so 5 of the 6 configured consumer threads probably sit idle
+    ? OP-001 [high] No graceful shutdown, so deploys kill in-flight checkouts and charges
+    ? OP-003 [medium] payment-service `POST /payments` is unauthenticated and charges any `customerId` and amount
+    ? OP-005 [medium] No metrics registry or alerts, so consumer lag, skipped stock decrements and payment failures are invisible

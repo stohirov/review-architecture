@@ -1,0 +1,29 @@
+01-monolith-unscalable: PASS
+  findings: 29
+  recall: 9/9 (100%)
+    + session-state <- SC-001
+    + local-filesystem <- SC-002
+    + scheduler-no-lock <- SC-004
+    + local-price-cache <- SC-003, SC-005
+    + unbounded-findall <- SC-005
+    + n-plus-one <- PS-004, PS-002, PS-003
+    + sync-email <- DC-001, DC-003, RS-001
+    + open-in-view <- PS-002
+    + stock-lost-update <- DC-001, DC-003, DC-002
+  bonus: ddl-auto-update, invoice-job-long-tx
+  not in answer key (review by hand):
+    ? OP-001 [critical] HPA on CPU `Utilization` cannot scale because the container declares no CPU request
+    ? DC-005 [high] Checkout POST has no idempotency guard; a double-submit creates two orders and decrements stock twice
+    ? DC-006 [high] Negative cart quantity and negative price are accepted, so stock goes up and order totals go negative
+    ? PS-001 [high] Hikari default pool of 10 per pod exceeds Postgres's default 100 connections at 12 pods
+    ? OP-002 [high] Readiness on aggregate `/actuator/health` includes the SMTP health check, and there is no liveness probe
+    ? OP-003 [high] No graceful shutdown: every deploy and HPA scale-in cuts in-flight checkouts
+    ? OP-004 [high] Admin and personal-data endpoints have no auth boundary: anyone can set prices or read any customer's orders
+    ? SB-001 [medium] order, media and billing use catalog's `ProductRepository`/`Product` entity (and order's repository) directly; nothing owns the stock and image invariants
+    ? SC-006 [medium] No rate limiting or load shedding on expensive public endpoints ahead of a 20x campaign
+    ? OP-005 [medium] DB credentials fall back to committed defaults, and the manifest injects no secrets
+    ? OP-006 [medium] No metrics or alerts on latency, pool saturation or checkout health before a 20x peak
+    ? OP-007 [medium] No PodDisruptionBudget or topology spread for the storefront
+    ? SB-002 [low] Public product API returns the JPA `Product` entity, exposing `stock` and `imageFile` as the contract
+    ? OP-008 [low] No request or correlation id in logs
+    ? SB-003 [info] Keep one deployable: the Black Friday problems do not call for splitting into microservices
