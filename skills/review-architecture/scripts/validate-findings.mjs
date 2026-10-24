@@ -109,8 +109,8 @@ function crossFieldChecks(doc, errors) {
     }
     if (t?.action !== "merged" && t?.action !== "regraded") return;
     if (!ids.has(t.finding)) errors.push(`${at}.finding: ${t.action} candidates must name an existing finding`);
-    if (t.action === "regraded" && (t.from === undefined || t.to === undefined || t.from === t.to)) {
-      errors.push(`${at}: regraded candidates need different from and to severities`);
+    if (t.action === "regraded" && (t.from !== undefined || t.to !== undefined) && (t.from === undefined || t.to === undefined || t.from === t.to)) {
+      errors.push(`${at}: a severity re-grade needs different from and to severities`);
     }
   });
   const lensesRun = doc.profile?.lenses_run;

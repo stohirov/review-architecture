@@ -22,7 +22,7 @@ The `##` headings are exactly: `## Summary`, `## Architecture profile`, `## Find
    - **Next**: the remaining critical and high, then the medium findings
    - **Later**: low findings, and info findings that carry an action
 
-   Inside each bucket, put a finding before the findings whose fix depends on it ("unblocks" means exactly this: a hard dependency), then order by severity. Write "nothing" when an item unblocks nothing. A cheap stopgap that protects users until a larger fix lands may go in Now, marked "stopgap for <id>".
+   Inside each bucket, put a finding before the findings whose fix depends on it ("unblocks" means exactly this: a hard dependency), then order by severity. If no item unblocks another, leave the "unblocks" part out of every line; otherwise write "nothing" for the items that unblock nothing. A cheap stopgap that protects users until a larger fix lands may go in Now, marked "stopgap for <id>".
 
    One line per item: id, the action, and what it unblocks.
 6. **What's already sound**: the `strengths` from the JSON. Name the patterns done right, so nobody "fixes" them.

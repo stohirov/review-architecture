@@ -318,7 +318,7 @@
               "low",
               "info"
             ],
-            "description": "regraded: the lens agent's severity."
+            "description": "regraded severity: the lens agent's severity. Omit for a confidence-only re-grade (say so in reason)."
           },
           "to": {
             "enum": [
@@ -328,7 +328,7 @@
               "low",
               "info"
             ],
-            "description": "regraded: the severity after step 5."
+            "description": "regraded severity: the severity after step 5."
           }
         }
       }

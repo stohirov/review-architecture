@@ -17,9 +17,9 @@ When a root cause fits more than one row, its owner is the lens whose fix closes
 
 | Root cause | Owner |
 |---|---|
-| remote call inside a transaction; dual writes (DB plus broker, DB plus callback or API); multi-step flows needing saga or compensation; idempotency of consumers and endpoints; lost updates and races on shared rows; input that corrupts invariants; transaction-boundary misuse | data-consistency |
+| remote call inside a transaction; dual writes (DB plus broker, DB plus callback or API); multi-step flows needing saga or compensation; idempotency of consumers and endpoints; lost updates, races and deadlocks on shared rows (including lock ordering); input that corrupts invariants; transaction-boundary misuse | data-consistency |
 | timeouts; circuit breakers; client-side retries and retry stacking; synchronous call chains; bulkheads; optional dependencies on the critical path | resilience |
-| ack and offset handling; DLQ and retry topics; ordering and partition keys; event schema and serialization; request/reply over a broker | messaging |
+| ack and offset handling (the duplicate *effect* of a redelivery belongs to data-consistency); DLQ and retry topics; ordering and partition keys; event schema and serialization; request/reply over a broker | messaging |
 | instance-local state, files and caches; schedulers on every replica; slow work in the request path; unbounded results; contention points; backpressure; consumer and thread capacity | scalability |
 | query shape and N+1; indexes and constraints; Open Session in View; schema migrations; connection pool sizing; table growth and retention; bulk writes | persistence |
 | shared databases; distributed-monolith coupling; chatty interfaces; internal models leaking across a boundary; premature splits | service-boundaries |
@@ -61,10 +61,10 @@ Return exactly these two parts and nothing else, as your final message or throug
      - codebase and hybrid: `[{ "file": "<repo-relative path>", "line": <n> }]`
      - a finding about something *missing*: point at the file where the setting or code belongs (if none exists, the closest build or deploy file), with `"section": "missing <what>"` instead of a line
      - design mode: `[{ "file": "<brief filename or 'conversation'>", "section": "<the brief's exact heading text>" }]`; for a gap, the heading of the section where the answer belongs
-   - `evidence`: quoted code, or text quoted verbatim from the brief (never from the profile); for a gap, say what the brief leaves out
+   - `evidence`: quoted code, or text quoted verbatim from the brief in double quotes (never from the profile; write the brief's own double quotes as single quotes inside your quote, and mark cuts with `...`); for a gap, say what the brief leaves out
    - `failure_scenario`: the concrete sequence of events that goes wrong
    - `recommendation`
-   - `pattern`: a kebab-case name from your checklist's vocabulary, or from another lens's if it fits better; coin a new one only when none fits
+   - `pattern`: a kebab-case name from your checklist's vocabulary, or from another lens's if it fits better; coin a new one when none fits, rather than reuse a name that means something else
    - `applies_when`: the condition in this project that makes the fix proportionate
    - `effort`: `small`, `medium` or `large`
 

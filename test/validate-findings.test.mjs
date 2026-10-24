@@ -233,7 +233,9 @@ test("triage records drops, merges and re-grades", () => {
   }));
   assert.ok(errors.some((e) => e.includes("a dropped candidate names no finding")));
   assert.ok(errors.some((e) => e.includes("must name an existing finding")));
-  assert.ok(errors.some((e) => e.includes("need different from and to severities")));
+  assert.ok(errors.some((e) => e.includes("needs different from and to severities")));
+  const confidenceOnly = [{ action: "regraded", candidate: "a: b", reason: "confidence lowered to medium", finding: "DC-001" }];
+  assert.deepEqual(validate(doc({ triage: confidenceOnly })), []);
   assert.ok(errors.some((e) => e.includes('"ignored" is not one of')));
 });
 
