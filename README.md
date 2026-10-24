@@ -103,14 +103,17 @@ Each run gave every fixture an isolated workspace and a reviewing agent that fol
 | r3 | not run | 11/11 | PASS: 0 high | not run |
 | r4 | 9/9 | 11/11 | FAIL: 1 high | 6/6 |
 | r5 | not run | not run | FAIL: 1 high | 6/6 |
+| r6 | not run | 11/11 | FAIL: 1 high | 6/6 |
+| r7 | not run | not run | PASS: 0 high | not run |
 
 Every control failure was a **real defect in the "healthy" fixture**, which the review found and which was then fixed in the fixture:
 - r1: the watchdog could cancel a reserved order, there was no input validation, the retry budget was shorter than the circuit-breaker window, and the payment consumer was undersized.
 - r2: DLT topic name mismatch, client-supplied prices, unbounded order lines.
 - r4: no authentication, so the charged customer came from the request body.
 - r5: every PSP 4xx was treated as a final decline, including 401 and 429. This was a regression in the r4 fix.
+- r6: the JWKS fetch had no timeouts (introduced by the r4 fix).
 
-r3 passed, but the fixture changed after it, so a pass on the current fixture is not yet recorded.
+r7 is the first pass on the current control fixture: 0 critical, 0 high, 11 medium, 11 low.
 
 Severity calibration changed in r4: fixture 02 went from 10 criticals (r3) to 2, with recall unchanged.
 

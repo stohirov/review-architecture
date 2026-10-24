@@ -1,0 +1,27 @@
+03-microservices-healthy: PASS
+  findings: 22
+  recall: 0/0 (100%)
+  control warning (check by hand): names an implemented pattern: DC-001, DC-002, RS-001, MQ-002, MQ-003, OP-001, OP-005
+  not in answer key (review by hand):
+    ? DC-001 [medium] Payment re-captures at the PSP before checking for an existing payment, so a late DLT redrive can double-charge once the PSP `Idempotency-Key` expires
+    ? DC-002 [low] `POST /orders` returns 500 for a concurrent retry with the same `Idempotency-Key`, and silently accepts key reuse with a different body
+    ? DC-003 [low] Stock rows are locked in request line order, so concurrent multi-line reservations can deadlock
+    ? RS-001 [medium] Payment listener keeps consuming while the `psp` circuit is open, so a PSP outage longer than ~3 min dead-letters `ChargePayment` commands
+    ? RS-002 [medium] PSP responses default to decline: HTTP 400 and any 2xx `outcome` other than `approved` become a final `PaymentFailed` that cancels the order
+    ? RS-003 [low] PSP retries are stacked: Resilience4j `psp` retry (3 attempts) inside the Kafka error handler (9 deliveries), and 429 and `CallNotPermittedException` are retried within ~600 ms
+    ? SB-001 [medium] `price_list` lives in order-service's database but is written directly by the external pricing back office (a table shared across a team boundary)
+    ? SB-002 [low] Raw PSP outcome codes (`declined_402`, PSP `outcome` strings) leak unmapped into `PaymentFailed.reason`, `order-events` and the customer-facing order view
+    ? MQ-001 [medium] Topics are declared without `min.insync.replicas`, so `acks=all` may be satisfied by the leader alone and a broker loss can drop a saga message the outbox already marked sent
+    ? MQ-002 [low] Deterministic failures (unknown `message-type`, missing header) are retried in place for ~3 minutes, stalling every partition on that consumer thread
+    ? MQ-003 [low] `<topic>-dlt` topics use the broker's default retention, so dead letters not redriven in time are deleted and their saga step is lost
+    ? SC-001 [medium] Each service's single ShedLock'd `OutboxRelay` sends rows one at a time with a blocking `get()` and a per-row save, capping publish rate at roughly 60-100 events/s per service
+    ? SC-002 [medium] `payment-commands` consumer capacity is capped at 12 blocking PSP calls in flight (`concurrency = "4"` x 3 pods = 12 partitions)
+    ? SC-003 [low] `SagaWatchdog` times out at most 100 orders per minute, below peak order arrival, so the 15-minute timeout slips during a long inventory stall
+    ? PS-001 [medium] Fixed Hikari pools (10 x 3 pods x 3 services = 90) against one Postgres server leave no room for a deploy surge or the planned scale-out
+    ? PS-002 [low] Daily outbox purge deletes a whole day of rows in one statement and transaction, unlike the chunked inbox purge
+    ? OP-001 [medium] Traces stop at each service: the outbox stores no trace context and Kafka observation is not enabled, so one saga cannot be followed across services
+    ? OP-002 [medium] No metric or alert on outbox backlog, consumer lag or watchdog timeouts, so a stalled relay or consumer silently turns into mass cancellations
+    ? OP-003 [medium] Deployments have no resource requests or limits, no PodDisruptionBudget or spread, and no startupProbe even though Flyway migrates at boot
+    ? OP-004 [low] Every DLT record is counted three times: all three services run a `.*-dlt` monitor in their own consumer group
+    ? OP-005 [low] No `preStop` delay on order-service, so requests are refused while k8s removes the pod from endpoints
+    ? OP-006 [low] The committed docker-compose stack cannot start: required placeholders are unset and the topics demand 3 replicas on a single broker
