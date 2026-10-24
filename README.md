@@ -88,7 +88,7 @@ node evals/score.mjs evals/results/02-microservices-distributed-tx/architecture-
   evals/answer-keys/02-microservices-distributed-tx.json
 ```
 
-A run passes when the findings file is valid, at least 90% of the `must_detect` keys are found, and no control finding is above the key's max severity. Control findings that name an already-implemented pattern are listed as warnings for review by hand. Findings that aren't in the key are listed too; they are often real issues the key doesn't cover.
+A run passes when the findings file is valid (and, with `--report` and `--brief`, the report layout and design-mode quotes check out), at least 90% of the `must_detect` keys are found, and no control finding is above the key's max severity. Control findings that name an already-implemented pattern are listed as warnings for review by hand. Findings that aren't in the key are listed too; they are often real issues the key doesn't cover.
 
 ### Results so far
 
@@ -99,10 +99,18 @@ Each run gave every fixture an isolated workspace and a reviewing agent that fol
 | r1 | 9/9 | 10/11 | FAIL: 4 high | 6/6 |
 | r2 | 9/9 | 11/11 | FAIL: 3 high | 6/6 |
 | r3 | not run | 11/11 | PASS: 0 high | not run |
+| r4 | 9/9 | 11/11 | FAIL: 1 high | 6/6 |
+| r5 | not run | not run | FAIL: 1 high | 6/6 |
 
-Both control failures were **real bugs in the "healthy" fixture**, which the review found and which were then fixed in the fixture:
+Every control failure was a **real defect in the "healthy" fixture**, which the review found and which was then fixed in the fixture:
 - r1: the watchdog could cancel a reserved order, there was no input validation, the retry budget was shorter than the circuit-breaker window, and the payment consumer was undersized.
 - r2: DLT topic name mismatch, client-supplied prices, unbounded order lines.
+- r4: no authentication, so the charged customer came from the request body.
+- r5: every PSP 4xx was treated as a final decline, including 401 and 429. This was a regression in the r4 fix.
+
+r3 passed, but the fixture changed after it, so a pass on the current fixture is not yet recorded.
+
+Severity calibration changed in r4: fixture 02 went from 10 criticals (r3) to 2, with recall unchanged.
 
 Feedback from each run was used to tune the skill; see each run's `SUMMARY.md`. r1 outputs predate the current profile schema (`stated_intent` became required), so they no longer validate.
 

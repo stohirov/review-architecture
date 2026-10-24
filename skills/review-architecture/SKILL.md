@@ -57,7 +57,7 @@ Start the lens agents **all in a single message** so they run in parallel. Build
 - **Medium**: one agent per lens.
 - **Large** (more than about 6 deployables or 400 source files): one agent per lens, with `data-consistency` and `resilience` also split per group of services. Keep the total at about 10 agents or fewer.
 
-Keep working notes (the profile, raw candidate lists) in a temporary directory unique to this run, never in the project. Wait for every agent before step 5, and don't redo their work while they run. If you are a subagent yourself, results may arrive as messages after your turn; stay running until every lens has reported.
+Keep working notes (the profile, raw candidate lists) in a temporary directory unique to this run, never in the project. Wait for every agent before step 5, and don't redo their work while they run. If you are a subagent yourself, lens results may arrive as messages after your turn ends: end the turn without handing back, resume as each report arrives, and hand back only after step 6.
 
 If some agents are refused, for example by a concurrency limit, launch them as earlier ones finish. Run a lens yourself only if it still cannot launch, and say so in the report's scope line. If the platform has no subagent tool, run each lens yourself in turn with the same brief.
 
@@ -70,7 +70,7 @@ Lens agents each see one lens and one slice of code. You see everything. For eve
 1. **Evidence**: open the cited location. The quoted evidence must be there: in code, at that line (correct the line number if it is off); in design mode, verbatim in the brief. Otherwise drop the candidate.
 2. **Mitigation**: search for a fix that lives elsewhere, such as a lock configured in another module, a global client timeout, an outbox relay, or a dedup table. If one exists, drop or downgrade the candidate.
 3. **Proportionality**: check `applies_when` against the profile. Drop recommendations the project's scale or shape does not justify.
-4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the ownership table in `references/AGENT-BRIEF.md`, fold the other angle into it, and list the other lens in `also_reported_by`. One cause with two distinct failures that need different fixes stays as two findings.
+4. **Duplicates**: when two lenses report one root cause, keep the finding under its owner in the ownership table in `references/AGENT-BRIEF.md`, fold the other angle into it, and list the other lens in `also_reported_by`. The merged finding takes the union of locations, and the severity and confidence that survive your own re-grade in point 5. One cause with two distinct failures that need different fixes stays as two findings.
 5. **Severity**: re-grade against the impact × trigger scale in `references/AGENT-BRIEF.md`. Critical is meant to be rare: re-check every critical against its trigger, and move narrow-window or rare-event findings to high. A critical or high finding needs medium or high confidence after your own reading.
 
 Assign ids by lens prefix and sequence: `SC` scalability, `DC` data-consistency, `RS` resilience, `SB` service-boundaries, `MQ` messaging, `PS` persistence, `OP` operability (for example `DC-001`).
