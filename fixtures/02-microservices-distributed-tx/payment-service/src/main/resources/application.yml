@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: payment-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/payments}
+    username: platform
+    password: platform
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+psp:
+  base-url: ${PSP_BASE_URL:https://sandbox.psp.example.com}
+  api-key: ${PSP_API_KEY}

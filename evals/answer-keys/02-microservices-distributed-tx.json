@@ -1,0 +1,126 @@
+{
+  "fixture": "02-microservices-distributed-tx",
+  "mode": "codebase",
+  "expected": [
+    {
+      "key": "http-in-tx-order",
+      "description": "order-service placeOrder() calls payment-service over Feign inside @Transactional",
+      "lenses": ["data-consistency"],
+      "files": ["order-service/src/main/java/com/example/platform/order/service/OrderService.java"],
+      "keywords": ["transaction|@Transactional", "payment|feign|http|remote"],
+      "must_detect": true
+    },
+    {
+      "key": "http-in-tx-payment",
+      "description": "payment-service charge() calls the PSP inside @Transactional; PSP capture survives a local rollback",
+      "lenses": ["data-consistency"],
+      "files": ["payment-service/src/main/java/com/example/platform/payment/service/PaymentService.java"],
+      "keywords": ["transaction|@Transactional", "psp|capture|provider"],
+      "must_detect": true
+    },
+    {
+      "key": "dual-write-no-outbox",
+      "description": "kafkaTemplate.send inside the order transaction with no outbox",
+      "lenses": ["data-consistency", "messaging"],
+      "files": ["OrderService.java"],
+      "keywords": ["outbox|dual.write|kafka"],
+      "must_detect": true
+    },
+    {
+      "key": "no-saga-compensation",
+      "description": "Order is charged, then inventory may reject it; nothing refunds the payment or cancels the order",
+      "lenses": ["data-consistency"],
+      "files": ["OrderEventsListener.java", "OrderService.java", "PaymentService.java"],
+      "keywords": ["saga|compensat|refund"],
+      "must_detect": true
+    },
+    {
+      "key": "non-idempotent-consumer",
+      "description": "Inventory listener decrements stock with no processed-event check; redelivery double-decrements",
+      "lenses": ["data-consistency", "messaging"],
+      "files": ["OrderEventsListener.java"],
+      "keywords": ["idempoten|duplicate|redeliver|twice|dedup"],
+      "must_detect": true
+    },
+    {
+      "key": "auto-commit-offsets",
+      "description": "Inventory consumer uses enable-auto-commit: true",
+      "lenses": ["messaging"],
+      "files": ["inventory-service/src/main/resources/application.yml", "OrderEventsListener.java"],
+      "keywords": ["auto.?commit|offset"],
+      "must_detect": true
+    },
+    {
+      "key": "no-dlq",
+      "description": "InsufficientStockException / unknown SKU poison messages with no DLQ or error handler",
+      "lenses": ["messaging"],
+      "files": ["OrderEventsListener.java", "inventory-service/src/main/resources/application.yml"],
+      "keywords": ["dlq|dead.letter|poison|error.handler"],
+      "must_detect": true
+    },
+    {
+      "key": "no-timeouts",
+      "description": "new RestTemplate() to the PSP and Feign client to payment-service with no timeouts",
+      "lenses": ["resilience"],
+      "files": ["HttpClientConfig.java", "PspClient.java", "PaymentClient.java", "order-service/src/main/resources/application.yml", "FeignConfig.java"],
+      "keywords": ["timeout"],
+      "must_detect": true
+    },
+    {
+      "key": "shared-database",
+      "description": "order-service and inventory-service share the shop database; inventory maps order_items directly",
+      "lenses": ["service-boundaries"],
+      "files": ["docker-compose.yml", "OrderLine.java", "inventory-service/src/main/resources/application.yml"],
+      "keywords": ["shared|order_items|database.per.service"],
+      "must_detect": true
+    },
+    {
+      "key": "unsafe-retries",
+      "description": "Feign Retryer.Default retries the non-idempotent POST /payments up to 5 times",
+      "lenses": ["resilience", "data-consistency"],
+      "files": ["FeignConfig.java"],
+      "keywords": ["retr"],
+      "must_detect": true
+    },
+    {
+      "key": "sync-call-chain",
+      "description": "order-service -> payment-service -> PSP synchronously on the checkout request",
+      "lenses": ["resilience", "service-boundaries"],
+      "files": ["OrderService.java", "PaymentService.java", "PspClient.java"],
+      "keywords": ["chain|synchronous|sync"],
+      "must_detect": true
+    },
+    {
+      "key": "stock-lost-update",
+      "description": "Read-modify-write on stock_items.available with listener concurrency 3 and no @Version",
+      "lenses": ["data-consistency"],
+      "files": ["OrderEventsListener.java", "StockItem.java"],
+      "keywords": ["concurren|lost.update|race|version|lock"],
+      "must_detect": false
+    },
+    {
+      "key": "no-circuit-breaker",
+      "description": "No circuit breaker around payment-service or the PSP",
+      "lenses": ["resilience"],
+      "files": ["PaymentClient.java", "PspClient.java", "OrderService.java", "PaymentService.java", "HttpClientConfig.java"],
+      "keywords": ["circuit"],
+      "must_detect": false
+    },
+    {
+      "key": "no-tracing",
+      "description": "No distributed tracing or correlation ids across the three services",
+      "lenses": ["operability"],
+      "files": ["pom.xml", "application.yml", "OrderService.java"],
+      "keywords": ["trac|correlation"],
+      "must_detect": false
+    },
+    {
+      "key": "ddl-auto-update",
+      "description": "ddl-auto=update in every service, with no migrations; fatal with a shared schema",
+      "lenses": ["persistence", "operability"],
+      "files": ["application.yml"],
+      "keywords": ["ddl|migration|flyway|liquibase"],
+      "must_detect": false
+    }
+  ]
+}
