@@ -1,0 +1,34 @@
+{
+  "fixture": "03-microservices-healthy",
+  "mode": "codebase",
+  "expected": [],
+  "control": {
+    "max_severity": "medium",
+    "forbidden_patterns": [
+      "transactional-outbox",
+      "saga-orchestration",
+      "saga-choreography",
+      "compensating-action",
+      "idempotent-consumer",
+      "idempotency-key",
+      "database-per-service",
+      "timeouts",
+      "circuit-breaker",
+      "dead-letter-queue",
+      "retry-topic",
+      "distributed-lock",
+      "manual-ack-after-processing",
+      "move-call-outside-transaction",
+      "after-commit-hook",
+      "disable-open-in-view",
+      "versioned-migrations",
+      "externalize-session",
+      "pagination",
+      "partition-by-aggregate-key",
+      "health-probes",
+      "graceful-shutdown",
+      "distributed-tracing"
+    ],
+    "notes": "Every forbidden pattern is already implemented. A finding recommending one is a false positive unless it names a concrete gap in the existing implementation; review those by hand."
+  }
+}
