@@ -39,6 +39,11 @@ spring:
       resourceserver:
         jwt:
           issuer-uri: ${AUTH_ISSUER_URI}
+          jwk-set-uri: ${AUTH_JWK_SET_URI}
+
+auth:
+  jwks-connect-timeout: 1s
+  jwks-read-timeout: 2s
 
 server:
   shutdown: graceful
