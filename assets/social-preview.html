@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    background: linear-gradient(135deg, #1C2B4A, #070B16);
+    font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+    display: flex; align-items: center; gap: 64px;
+    padding: 0 88px; box-sizing: border-box; color: #FFFFFF;
+  }
+  img { width: 340px; height: 340px; flex: none; }
+  h1 { margin: 0 0 20px; font-size: 64px; font-weight: 700; letter-spacing: -1.5px; }
+  p { margin: 0 0 36px; font-size: 30px; line-height: 1.35; color: #C9D5E6; }
+  .chips { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 40px; }
+  .chip {
+    font-size: 22px; padding: 8px 18px; border-radius: 999px;
+    border: 2px solid #38BDF8; color: #9BE1FF;
+  }
+  .chip.hot { border-color: #FF5A3C; color: #FF9A5C; }
+  .foot { font-size: 22px; color: #8FA3C0; }
+</style>
+</head>
+<body>
+  <img src="icon.svg" alt="">
+  <div>
+    <h1>review-architecture</h1>
+    <p>Finds the system-design mistakes that will hurt at your scale, and the smallest fix for each.</p>
+    <div class="chips">
+      <span class="chip hot">double charges</span>
+      <span class="chip">lost events</span>
+      <span class="chip">unsafe retries</span>
+      <span class="chip">replica-unsafe state</span>
+    </div>
+    <div class="foot">Claude Code plugin · github.com/stohirov/review-architecture</div>
+  </div>
+</body>
+</html>

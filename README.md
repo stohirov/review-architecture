@@ -1,6 +1,30 @@
 # review-architecture
 
-An agent skill that reviews a system's architecture and recommends fixes. Point it at a codebase, or describe a project you're planning. It finds the system-design mistakes that will hurt at your scale, proves each one with evidence, and recommends the smallest pattern that fixes it.
+A Claude Code skill that finds the system-design mistakes that will hurt at your scale: double charges, lost events, unsafe retries, state that breaks when you add a replica. Point it at a codebase, or describe a project you're planning. It proves each mistake with evidence and recommends the smallest pattern that fixes it.
+
+## What a finding looks like
+
+This is from a review of `fixtures/02-microservices-distributed-tx`, three Spring Boot services that take payment for orders. Condensed; see the [full report](evals/results/r4/02-microservices-distributed-tx/architecture-review.md).
+
+> **DC-001 · Feign retries the non-idempotent POST `/payments` up to 5 times, and each attempt makes a new PSP capture**
+>
+> Severity: critical · Confidence: high · Lens: data-consistency
+>
+> **Where**: `order-service/…/config/FeignConfig.java:13`, `payment-service/…/service/PaymentService.java:24`, `payment-service/…/psp/PspClient.java:34`
+>
+> **What goes wrong**: payment-service is slow, which the code's own comment says happens under load, or a payment-service pod is killed mid-request during a routine deploy. The PSP has already captured the money, but order-service's Feign call times out or gets a connection reset. `Retryer.Default` sends POST /payments again. payment-service inserts a new Payment row with a new UUID and captures again with no idempotency key. The customer is charged 2 to 5 times for one order.
+>
+> **Fix** (`idempotency-key`): Add a unique constraint on `payment.order_id`, and return the existing payment for that order instead of creating a new one. Send a stable key derived from the order as the PSP's Idempotency-Key header. Until both exist, remove the global retryer.
+>
+> **Why it's worth it here**: Every order goes through a retried call that moves money.
+
+The same review found that inventory-service couldn't deserialize any event the producer sent, so stock was never decremented.
+
+It also has to stay quiet when there's nothing to fix. The evals include a control fixture built to be correct, with an outbox, an orchestrated saga and idempotent consumers. Over six review rounds the skill found 10 real defects in that control, each confirmed and fixed. On the current control it reports nothing above medium. See [Evals](#evals).
+
+The review is read-only. It reads your files, writes two report files, and runs one dependency-free validator script. It never installs packages, makes network requests, or runs your build, tests or code. See [what it runs and touches](plugins/review-architecture/README.md#what-it-runs-and-what-it-touches).
+
+## Modes
 
 - **Codebase mode**: run it inside a repo. It profiles the project (stack, deployables, datastores, sync and async edges, key flows), then sends parallel lens agents through the code.
 - **Design mode**: describe a planned system, or hand it a brief. It asks up to five questions about the gaps (load, consistency needs, team, availability), then reviews the design before any code exists.
@@ -143,6 +167,7 @@ Feedback from each run was used to tune the skill; see each run's `SUMMARY.md`. 
 - `plugins/review-architecture/`: the plugin itself, the only part that gets installed
 - `.claude-plugin/marketplace.json`: makes this repo a one-plugin marketplace
 - `assets/icon.svg`: source of the plugin icon; `plugins/review-architecture/.claude-plugin/icon.png` is rendered from it at 1024×1024
+- `assets/social-preview.html`: source of the GitHub social preview card; `assets/social-preview.png` is a 1280×640 headless-Chrome screenshot of it
 - `fixtures/`, `evals/`, `test/`: test projects, answer keys, eval runs and the validator and scorer tests; not installed
 
 ## Development
