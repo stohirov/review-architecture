@@ -5,6 +5,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.apache.kafka.common.TopicPartition;
 import org.springframework.kafka.support.ExponentialBackOffWithMaxRetries;
 
 @Configuration
@@ -20,7 +21,10 @@ public class KafkaConfig {
         backOff.setInitialInterval(1_000);
         backOff.setMultiplier(2.0);
         backOff.setMaxInterval(60_000);
-        DefaultErrorHandler handler = new DefaultErrorHandler(new DeadLetterPublishingRecoverer(template), backOff);
+        // Same partition on <topic>-dlt (declared in TopicsConfig with matching partition counts).
+        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(template,
+                (record, ex) -> new TopicPartition(record.topic() + "-dlt", record.partition()));
+        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
         handler.addNotRetryableExceptions(com.fasterxml.jackson.core.JsonProcessingException.class);
         return handler;
     }
