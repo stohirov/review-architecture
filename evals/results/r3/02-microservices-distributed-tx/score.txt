@@ -1,0 +1,25 @@
+02-microservices-distributed-tx: PASS
+  findings: 27
+  recall: 11/11 (100%)
+    + http-in-tx-order <- DC-003
+    + http-in-tx-payment <- DC-002
+    + dual-write-no-outbox <- DC-003, DC-004
+    + no-saga-compensation <- DC-002, DC-003, DC-005, DC-006
+    + non-idempotent-consumer <- DC-004, DC-005, DC-006
+    + auto-commit-offsets <- MQ-001, MQ-003
+    + no-dlq <- MQ-002
+    + no-timeouts <- RS-001, RS-002, RS-003
+    + shared-database <- SB-001
+    + unsafe-retries <- DC-001
+    + sync-call-chain <- RS-004
+  bonus: stock-lost-update, no-circuit-breaker, no-tracing, ddl-auto-update
+  not in answer key (review by hand):
+    ? DC-008 [critical] POST `/orders` trusts client-supplied `unitPrice` and `quantity` unvalidated: callers set their own charge and can add phantom stock
+    ? DC-009 [high] POST `/orders` has no idempotency key: a client or gateway retry after a timeout creates a second order and a second charge
+    ? MQ-004 [medium] `OrderPaidEvent` is hand-copied into two independently deployed services with no version field or contract check
+    ? PS-001 [high] No index on `order_items.order_id`, yet inventory-service queries by it for every `order-events` message
+    ? OP-001 [high] No authenticated identity reaches the services: order-service charges whatever `customerId` the body names, and `/payments` is open
+    ? OP-002 [medium] No graceful shutdown on Boot 3.3.4: every rolling deploy cuts in-flight checkout and payment requests
+    ? OP-003 [medium] DB credentials `platform`/`platform` committed in all three services, one login for both `shop` and `payments`
+    ? OP-005 [medium] No metrics or alerts on consumer lag, skipped `order-events` records, pool saturation or payment outcomes
+    ? SC-001 [low] `order-events` partition count is undeclared, so `concurrency: 3` x 2 replicas likely leaves 5 of 6 consumer threads idle

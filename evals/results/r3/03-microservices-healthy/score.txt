@@ -1,0 +1,25 @@
+03-microservices-healthy: PASS
+  findings: 20
+  recall: 0/0 (100%)
+  control warning (check by hand): names an implemented pattern: RS-001, DC-001, MQ-001, DC-002, OP-004, MQ-002, OP-006
+  not in answer key (review by hand):
+    ? RS-001 [medium] A PSP outage longer than ~3 minutes dead-letters the head `ChargePayment` of every partition every ~3 minutes; the open circuit breaker does not pause consumption
+    ? DC-001 [medium] `Idempotency-Key` on `POST /orders` is global and not checked against customer or payload, and a concurrent duplicate returns 500 for an order that was placed
+    ? OP-001 [medium] No metric for outbox backlog or age, or for watchdog timeouts, so a stalled relay cancels every order after 15 minutes without paging anyone
+    ? OP-002 [medium] `kafka.dlt.records` is registered on its first increment, so `rate`/`increase` alerts miss the first dead letter per pod and topic
+    ? MQ-001 [medium] DLT topics use the broker's default retention, so parked saga steps can be deleted before anyone redrives them
+    ? DC-002 [medium] payment-service records nothing before calling the PSP, so a capture whose `ChargePayment` dead-letters is recoverable only while the PSP still honours `capture-<orderId>`
+    ? OP-003 [medium] Deployments declare no resource requests or limits, PodDisruptionBudget, spread constraints or startupProbe, while Flyway migrates at boot
+    ? SB-001 [medium] An outside pricing back office writes directly to `price_list` in order-service's database, whose schema order-service's Flyway owns
+    ? SC-001 [medium] `payment-commands` caps payment throughput at 12 concurrent PSP calls (12 partitions = 3 replicas x 4 threads), so extra replicas cannot add capacity for next year's load
+    ? SC-002 [medium] The outbox relay is a single cluster-wide thread that sends one event at a time and commits each separately, and its 30 s lock lease can expire mid-run
+    ? OP-004 [medium] Trace context stops at the outbox: no `traceparent` is stored or sent as a Kafka header, and Kafka observation is off, so a saga cannot be followed across services
+    ? OP-005 [medium] order-service takes `customerId` from the client on `POST` and `GET /orders`; no authenticated principal is consulted
+    ? RS-002 [low] PSP retries stack across Resilience4j (3 attempts) and the Kafka error handler (9 deliveries) and do not distinguish error types, so permanent 4xx errors are tried 27 times before dead-lettering
+    ? MQ-002 [low] Permanently malformed messages (a missing `message-id`/`message-type` header, an unknown command) are retried for ~3 minutes before dead-lettering, stalling their partition
+    ? DC-003 [low] `StockService.reserve` locks `stock_items` rows in the client's line order, so two orders with overlapping SKUs in opposite order can deadlock
+    ? SC-003 [low] `SagaWatchdog` times out at most 100 orders per minute while orders arrive at up to 300/min (900/min next year)
+    ? PS-001 [low] Index migrations use plain `CREATE INDEX` on the hot `orders` table, which blocks writes while Flyway runs at pod boot
+    ? PS-002 [low] The outbox purge deletes a whole day of sent rows in one statement, unlike the chunked inbox purge
+    ? SB-002 [low] The PSP's raw `outcome` string passes unmapped into `PaymentFailed`, `OrderCancelled` and the public `GET /orders` response
+    ? OP-006 [low] No `preStop` delay: graceful shutdown starts refusing connections before k8s removes the pod from its endpoints
